@@ -27,16 +27,16 @@ def post_to_discord(embed_data):
     except Exception as e:
         print(f"[Discord] Error posting: {e}")
 
-def fetch_5min_data(symbol: str, trade_date: datetime):
-    """Fetch 5-minute intraday data for a specific trading day"""
+def fetch_and_aggregate_5min_data(symbol: str, trade_date: datetime):
+    """Fetch 1-minute data and aggregate to 5-minute bars"""
     try:
         hist_client = db.Historical(databento_key)
         
-        # Fetch 5-min bars for the trading day
+        # Fetch 1-min bars for the trading day
         start = trade_date.replace(hour=0, minute=0, second=0)
         end = trade_date.replace(hour=23, minute=59, second=59)
         
-        print(f"[Databento] Fetching {symbol} 5-min bars for {trade_date.date()}")
+        print(f"[Databento] Fetching {symbol} 1-min bars for {trade_date.date()}")
         
         data = hist_client.timeseries.get_range(
             dataset="GLBX.MDP3",
@@ -44,15 +44,27 @@ def fetch_5min_data(symbol: str, trade_date: datetime):
             stype_in="parent",
             start=start.isoformat(),
             end=end.isoformat(),
-            schema="ohlcv-5m"
+            schema="ohlcv-1m"
         )
         
         df = data.to_df()
         df = df.sort_values('ts_event').reset_index(drop=True)
-        print(f"[Databento] Retrieved {len(df)} 5-min bars for {symbol}")
-        return df
+        print(f"[Databento] Retrieved {len(df)} 1-min bars for {symbol}")
+        
+        # Aggregate to 5-minute bars
+        df['time_5m'] = df['ts_event'].dt.floor('5min')
+        bars_5m = df.groupby('time_5m').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }).reset_index()
+        
+        print(f"[Databento] Aggregated to {len(bars_5m)} 5-min bars")
+        return bars_5m
     except Exception as e:
-        print(f"[Error] Failed to fetch {symbol} 5-min data: {e}")
+        print(f"[Error] Failed to fetch {symbol} data: {e}")
         return None
 
 def get_ai_entry_decision(nq_bars: list, es_bars: list, nq_context: list, es_context: list) -> dict:
@@ -243,9 +255,9 @@ def main():
     
     print(f"[Hermes] Trading {trade_date.strftime('%Y-%m-%d')}...")
     
-    # Fetch 5-min data for today
-    nq_5min = fetch_5min_data("NQ", trade_date)
-    es_5min = fetch_5min_data("ES", trade_date)
+    # Fetch and aggregate 5-min data for today
+    nq_5min = fetch_and_aggregate_5min_data("NQ", trade_date)
+    es_5min = fetch_and_aggregate_5min_data("ES", trade_date)
     
     if nq_5min is None or es_5min is None or len(nq_5min) == 0 or len(es_5min) == 0:
         print("[Error] Failed to fetch 5-min data")
@@ -262,42 +274,35 @@ def main():
         for _, row in es_5min.iterrows()
     ]
     
+    print(f"[Hermes] NQ: {len(nq_bars)} 5-min bars, ES: {len(es_bars)} 5-min bars")
+    
     # Fetch prior 5 days for context
-    fetch_start = trade_date - timedelta(days=5)
-    fetch_end = trade_date - timedelta(days=1)
-    
-    nq_context_df = fetch_5min_data("NQ", fetch_start) if fetch_start < trade_date else None
-    es_context_df = fetch_5min_data("ES", fetch_start) if fetch_start < trade_date else None
-    
     nq_context = []
     es_context = []
     
-    # Get daily closes from prior days
-    for i in range(5):
-        prior_date = trade_date - timedelta(days=5-i)
+    for i in range(1, 6):
+        prior_date = trade_date - timedelta(days=i)
         try:
-            prior_nq = fetch_5min_data("NQ", prior_date)
-            prior_es = fetch_5min_data("ES", prior_date)
+            prior_nq = fetch_and_aggregate_5min_data("NQ", prior_date)
+            prior_es = fetch_and_aggregate_5min_data("ES", prior_date)
             
             if prior_nq is not None and len(prior_nq) > 0:
-                last_nq = prior_nq.iloc[-1]
-                nq_context.append({
+                nq_context.insert(0, {
                     "date": prior_date.strftime('%Y-%m-%d'),
                     "open": float(prior_nq.iloc[0]['open']),
                     "high": float(prior_nq['high'].max()),
                     "low": float(prior_nq['low'].min()),
-                    "close": float(last_nq['close']),
+                    "close": float(prior_nq.iloc[-1]['close']),
                     "volume": int(prior_nq['volume'].sum())
                 })
             
             if prior_es is not None and len(prior_es) > 0:
-                last_es = prior_es.iloc[-1]
-                es_context.append({
+                es_context.insert(0, {
                     "date": prior_date.strftime('%Y-%m-%d'),
                     "open": float(prior_es.iloc[0]['open']),
                     "high": float(prior_es['high'].max()),
                     "low": float(prior_es['low'].min()),
-                    "close": float(last_es['close']),
+                    "close": float(prior_es.iloc[-1]['close']),
                     "volume": int(prior_es['volume'].sum())
                 })
         except:
