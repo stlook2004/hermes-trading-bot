@@ -159,7 +159,7 @@ class TradingBot:
             bars = []
             for record in data:
                 bars.append({
-                    "ts": record.ts_event,
+                    "ts": record.ts,
                     "open": record.open,
                     "high": record.high,
                     "low": record.low,
