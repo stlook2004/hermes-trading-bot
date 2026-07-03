@@ -27,60 +27,80 @@ def post_to_discord(embed_data):
     except Exception as e:
         print(f"[Discord] Error posting: {e}")
 
-def fetch_futures_data(symbol: str, start_date: datetime, end_date: datetime):
-    """Fetch futures data for a specific date range"""
+def fetch_5min_data(symbol: str, trade_date: datetime):
+    """Fetch 5-minute intraday data for a specific trading day"""
     try:
         hist_client = db.Historical(databento_key)
         
-        print(f"[Databento] Fetching {symbol} from {start_date.date()} to {end_date.date()}")
+        # Fetch 5-min bars for the trading day
+        start = trade_date.replace(hour=0, minute=0, second=0)
+        end = trade_date.replace(hour=23, minute=59, second=59)
+        
+        print(f"[Databento] Fetching {symbol} 5-min bars for {trade_date.date()}")
         
         data = hist_client.timeseries.get_range(
             dataset="GLBX.MDP3",
             symbols=f"{symbol}.FUT",
             stype_in="parent",
-            start=start_date.isoformat(),
-            end=end_date.isoformat(),
-            schema="ohlcv-1d"
+            start=start.isoformat(),
+            end=end.isoformat(),
+            schema="ohlcv-5m"
         )
         
         df = data.to_df()
         df = df.sort_values('ts_event').reset_index(drop=True)
-        print(f"[Databento] Retrieved {len(df)} bars for {symbol}")
+        print(f"[Databento] Retrieved {len(df)} 5-min bars for {symbol}")
         return df
     except Exception as e:
-        print(f"[Error] Failed to fetch {symbol} data: {e}")
+        print(f"[Error] Failed to fetch {symbol} 5-min data: {e}")
         return None
 
-def get_ai_trade_decision(nq_data: dict, es_data: dict, nq_context: list, es_context: list) -> dict:
-    """Use Claude to analyze both NQ and ES and pick the best trade"""
+def get_ai_entry_decision(nq_bars: list, es_bars: list, nq_context: list, es_context: list) -> dict:
+    """Use Claude to analyze early bars and decide on entry"""
     
-    nq_context_str = ""
-    if len(nq_context) > 0:
-        nq_context_str = "\n".join([
-            f"{d['date']}: O={d['open']:.2f} H={d['high']:.2f} L={d['low']:.2f} C={d['close']:.2f}"
-            for d in nq_context
-        ])
+    # Format early bars (first 2 hours = 24 bars of 5-min)
+    nq_early = nq_bars[:24] if len(nq_bars) >= 24 else nq_bars
+    es_early = es_bars[:24] if len(es_bars) >= 24 else es_bars
     
-    es_context_str = ""
-    if len(es_context) > 0:
-        es_context_str = "\n".join([
-            f"{d['date']}: O={d['open']:.2f} H={d['high']:.2f} L={d['low']:.2f} C={d['close']:.2f}"
-            for d in es_context
-        ])
+    nq_early_str = "\n".join([
+        f"{i*5}min: O={b['open']:.2f} H={b['high']:.2f} L={b['low']:.2f} C={b['close']:.2f}"
+        for i, b in enumerate(nq_early)
+    ])
     
-    prompt = f"""Analyze both NQ and ES futures for {nq_data['date']} and pick the BEST single trade.
+    es_early_str = "\n".join([
+        f"{i*5}min: O={b['open']:.2f} H={b['high']:.2f} L={b['low']:.2f} C={b['close']:.2f}"
+        for i, b in enumerate(es_early)
+    ])
+    
+    nq_context_str = "\n".join([
+        f"{d['date']}: O={d['open']:.2f} H={d['high']:.2f} L={d['low']:.2f} C={d['close']:.2f}"
+        for d in nq_context[-5:]  # Last 5 days
+    ])
+    
+    es_context_str = "\n".join([
+        f"{d['date']}: O={d['open']:.2f} H={d['high']:.2f} L={d['low']:.2f} C={d['close']:.2f}"
+        for d in es_context[-5:]  # Last 5 days
+    ])
+    
+    prompt = f"""Analyze early trading action (first 2 hours) and pick ONE intraday trade to ENTER now.
 
-TODAY - NQ: O={nq_data['open']:.2f} H={nq_data['high']:.2f} L={nq_data['low']:.2f} C={nq_data['close']:.2f} V={nq_data['volume']}
-TODAY - ES: O={es_data['open']:.2f} H={es_data['high']:.2f} L={es_data['low']:.2f} C={es_data['close']:.2f} V={es_data['volume']}
+TODAY'S FIRST 2 HOURS (5-min bars):
 
-NQ PRIOR 10 DAYS:
-{nq_context_str if nq_context_str else "No prior data"}
+NQ:
+{nq_early_str}
 
-ES PRIOR 10 DAYS:
-{es_context_str if es_context_str else "No prior data"}
+ES:
+{es_early_str}
 
-Pick ONE trade: NQ or ES, BUY/SELL/HOLD. Respond ONLY as JSON:
-{{"market": "NQ"|"ES", "action": "BUY"|"SELL"|"HOLD", "confidence": 0.0-1.0, "reason": "one sentence"}}"""
+PRIOR 5 DAYS CONTEXT:
+
+NQ: {nq_context_str if nq_context_str else "No data"}
+ES: {es_context_str if es_context_str else "No data"}
+
+Pick ONE market (NQ or ES) and BUY or SELL based on early momentum. You will close this trade later in the day.
+
+Respond ONLY as JSON:
+{{"market": "NQ"|"ES", "action": "BUY"|"SELL", "entry_reason": "one sentence", "confidence": 0.0-1.0}}"""
 
     try:
         message = client.messages.create(
@@ -91,34 +111,75 @@ Pick ONE trade: NQ or ES, BUY/SELL/HOLD. Respond ONLY as JSON:
         
         if not message.content or len(message.content) == 0:
             print("[Error] Empty response from Claude")
-            return {"market": "NONE", "action": "HOLD", "confidence": 0.5, "reason": "empty response"}
+            return None
         
         response_text = message.content[0].text
         
         if not response_text:
             print("[Error] No text in Claude response")
-            return {"market": "NONE", "action": "HOLD", "confidence": 0.5, "reason": "no text"}
+            return None
         
-        print(f"[Claude] Raw response: {response_text}")
+        print(f"[Claude] Entry decision: {response_text}")
         
         start_idx = response_text.find('{')
         end_idx = response_text.rfind('}') + 1
         
         if start_idx == -1 or end_idx <= start_idx:
-            print(f"[Error] No JSON found in response: {response_text}")
-            return {"market": "NONE", "action": "HOLD", "confidence": 0.5, "reason": "no json"}
+            print(f"[Error] No JSON found in response")
+            return None
         
         json_str = response_text[start_idx:end_idx]
         result = json.loads(json_str)
-        print(f"[Claude] Parsed decision: {result}")
         return result
         
-    except json.JSONDecodeError as e:
-        print(f"[Error] JSON parse error: {e}")
-        return {"market": "NONE", "action": "HOLD", "confidence": 0.5, "reason": "json error"}
     except Exception as e:
-        print(f"[Error] Failed to get AI decision: {e}")
-        return {"market": "NONE", "action": "HOLD", "confidence": 0.5, "reason": "api error"}
+        print(f"[Error] Failed to get entry decision: {e}")
+        return None
+
+def get_ai_exit_decision(entry_price: float, market: str, bars_since_entry: list, current_bar: dict) -> dict:
+    """Use Claude to decide when to exit the trade"""
+    
+    bars_str = "\n".join([
+        f"{i*5}min: O={b['open']:.2f} H={b['high']:.2f} L={b['low']:.2f} C={b['close']:.2f}"
+        for i, b in enumerate(bars_since_entry[-12:])  # Last hour
+    ])
+    
+    prompt = f"""You entered a {market} trade at {entry_price:.2f}. Current price: {current_bar['close']:.2f}. P&L: {current_bar['close'] - entry_price:.2f}
+
+Recent bars (last hour):
+{bars_str}
+
+Current bar: O={current_bar['open']:.2f} H={current_bar['high']:.2f} L={current_bar['low']:.2f} C={current_bar['close']:.2f}
+
+Should you EXIT now? Consider: profit taking, stop loss, trend reversal.
+
+Respond ONLY as JSON:
+{{"should_exit": true|false, "reason": "one sentence"}}"""
+
+    try:
+        message = client.messages.create(
+            model="claude-sonnet-5",
+            max_tokens=100,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        
+        response_text = message.content[0].text if message.content else ""
+        
+        if not response_text:
+            return {"should_exit": False, "reason": "no response"}
+        
+        start_idx = response_text.find('{')
+        end_idx = response_text.rfind('}') + 1
+        
+        if start_idx == -1 or end_idx <= start_idx:
+            return {"should_exit": False, "reason": "no json"}
+        
+        json_str = response_text[start_idx:end_idx]
+        return json.loads(json_str)
+        
+    except Exception as e:
+        print(f"[Error] Failed to get exit decision: {e}")
+        return {"should_exit": False, "reason": "error"}
 
 def load_state():
     """Load current state from persistent volume"""
@@ -127,15 +188,15 @@ def load_state():
         try:
             with open(state_file, 'r') as f:
                 state = json.load(f)
-                print(f"[State] Loaded state from {state_file}: current_date={state.get('current_date')}")
+                print(f"[State] Loaded: current_date={state.get('current_date')}")
                 return state
         except Exception as e:
             print(f"[Error] Failed to load state: {e}")
     
-    print("[State] No state file found, starting fresh from 2020-07-04")
+    print("[State] Starting fresh from 2020-07-04")
     return {
         "current_date": "2020-07-04",
-        "portfolio": {"position": None, "market": None, "entry_price": 0},
+        "portfolio": {"position": None, "market": None, "entry_price": 0, "entry_bar_idx": 0},
         "daily_pnl": [],
         "trades": []
     }
@@ -146,167 +207,208 @@ def save_state(state):
     try:
         with open(state_file, 'w') as f:
             json.dump(state, f)
-        print(f"[State] Saved state to {state_file}: current_date={state.get('current_date')}")
+        print(f"[State] Saved: current_date={state.get('current_date')}")
     except Exception as e:
         print(f"[Error] Failed to save state: {e}")
 
-def format_discord_embed(nq_data, es_data, decision, pnl, state):
-    """Format single trade as Discord embed"""
+def format_discord_embed(trade_date: str, entry_price: float, exit_price: float, market: str, action: str, pnl: float, state: dict):
+    """Format trade result as Discord embed"""
     
     total_pnl = sum(state['daily_pnl'])
     num_trades = len([p for p in state['daily_pnl'] if p != 0])
     winning_trades = len([p for p in state['daily_pnl'] if p > 0])
     win_rate = (winning_trades / num_trades * 100) if num_trades > 0 else 0
     
-    color_map = {"BUY": 0x0099ff, "SELL": 0xff6600, "HOLD": 0x999999}
-    action = decision.get('action', 'HOLD')
-    market = decision.get('market', 'NONE')
-    color = color_map.get(action, 0x999999)
+    color = 0x00ff00 if pnl > 0 else 0xff0000 if pnl < 0 else 0x999999
     
-    if market == "NQ":
-        traded_data = nq_data
-    elif market == "ES":
-        traded_data = es_data
-    else:
-        traded_data = None
-    
-    if action == "BUY" and market != "NONE":
-        trade_desc = f"🟢 **BUY {market}** @ {traded_data['close']:.2f}"
-    elif action == "SELL" and market != "NONE":
-        trade_desc = f"🔴 **SELL {market}** @ {traded_data['close']:.2f}\nP&L: ${pnl:.2f}"
-    else:
-        trade_desc = f"⚪ **HOLD** - No trade"
-    
-    market_comp = f"""**NQ**: O={nq_data['open']:.2f} H={nq_data['high']:.2f} L={nq_data['low']:.2f} C={nq_data['close']:.2f}
-**ES**: O={es_data['open']:.2f} H={es_data['high']:.2f} L={es_data['low']:.2f} C={es_data['close']:.2f}"""
+    trade_desc = f"**{action} {market}** @ {entry_price:.2f} → {exit_price:.2f}\nP&L: ${pnl:.2f}"
     
     embed = {
-        "title": f"📊 Futures Trading - {nq_data['date']}",
+        "title": f"📊 Intraday Trade - {trade_date}",
         "color": color,
         "fields": [
-            {"name": "Trade Decision", "value": trade_desc, "inline": False},
-            {"name": "Market Data", "value": market_comp, "inline": False},
-            {"name": "AI Reasoning", "value": decision.get('reason', 'N/A'), "inline": False},
+            {"name": "Trade", "value": trade_desc, "inline": False},
             {"name": "Account Stats", "value": f"Total P&L: ${total_pnl:.2f}\nTrades: {num_trades}\nWin Rate: {win_rate:.1f}%", "inline": False}
         ],
-        "footer": {"text": f"Confidence: {decision.get('confidence', 0):.0%}"}
+        "footer": {"text": f"Cumulative P&L: ${total_pnl:.2f}"}
     }
     
     return embed
 
 def main():
-    print("[Hermes] Starting daily futures trade cycle...")
+    print("[Hermes] Starting intraday trading cycle...")
     
     state = load_state()
-    current_date = datetime.strptime(state['current_date'], '%Y-%m-%d')
+    trade_date = datetime.strptime(state['current_date'], '%Y-%m-%d')
     
-    print(f"[Hermes] Processing {current_date.strftime('%Y-%m-%d')}...")
+    print(f"[Hermes] Trading {trade_date.strftime('%Y-%m-%d')}...")
     
-    # Fetch only the data we need: current day + prior 10 days
-    fetch_start = current_date - timedelta(days=10)
-    fetch_end = current_date
+    # Fetch 5-min data for today
+    nq_5min = fetch_5min_data("NQ", trade_date)
+    es_5min = fetch_5min_data("ES", trade_date)
     
-    nq_df = fetch_futures_data("NQ", fetch_start, fetch_end)
-    es_df = fetch_futures_data("ES", fetch_start, fetch_end)
-    
-    if nq_df is None or es_df is None or len(nq_df) == 0 or len(es_df) == 0:
-        print("[Error] Failed to fetch futures data")
+    if nq_5min is None or es_5min is None or len(nq_5min) == 0 or len(es_5min) == 0:
+        print("[Error] Failed to fetch 5-min data")
         return
     
-    # Get today's data (last row)
-    nq_row = nq_df.iloc[-1]
-    es_row = es_df.iloc[-1]
+    # Convert to bar dicts
+    nq_bars = [
+        {"open": float(row['open']), "high": float(row['high']), "low": float(row['low']), "close": float(row['close']), "volume": int(row['volume'])}
+        for _, row in nq_5min.iterrows()
+    ]
     
-    nq_data = {
-        "date": current_date.strftime('%Y-%m-%d'),
-        "open": float(nq_row['open']),
-        "high": float(nq_row['high']),
-        "low": float(nq_row['low']),
-        "close": float(nq_row['close']),
-        "volume": int(nq_row['volume'])
-    }
+    es_bars = [
+        {"open": float(row['open']), "high": float(row['high']), "low": float(row['low']), "close": float(row['close']), "volume": int(row['volume'])}
+        for _, row in es_5min.iterrows()
+    ]
     
-    es_data = {
-        "date": current_date.strftime('%Y-%m-%d'),
-        "open": float(es_row['open']),
-        "high": float(es_row['high']),
-        "low": float(es_row['low']),
-        "close": float(es_row['close']),
-        "volume": int(es_row['volume'])
-    }
+    # Fetch prior 5 days for context
+    fetch_start = trade_date - timedelta(days=5)
+    fetch_end = trade_date - timedelta(days=1)
     
-    # Get prior 10 days context (all rows except the last one)
+    nq_context_df = fetch_5min_data("NQ", fetch_start) if fetch_start < trade_date else None
+    es_context_df = fetch_5min_data("ES", fetch_start) if fetch_start < trade_date else None
+    
     nq_context = []
-    for i in range(len(nq_df) - 1):
-        row = nq_df.iloc[i]
-        nq_context.append({
-            "date": (fetch_start + timedelta(days=i)).strftime('%Y-%m-%d'),
-            "open": float(row['open']),
-            "high": float(row['high']),
-            "low": float(row['low']),
-            "close": float(row['close']),
-            "volume": int(row['volume'])
-        })
-    
     es_context = []
-    for i in range(len(es_df) - 1):
-        row = es_df.iloc[i]
-        es_context.append({
-            "date": (fetch_start + timedelta(days=i)).strftime('%Y-%m-%d'),
-            "open": float(row['open']),
-            "high": float(row['high']),
-            "low": float(row['low']),
-            "close": float(row['close']),
-            "volume": int(row['volume'])
-        })
     
-    # Get AI decision
-    decision = get_ai_trade_decision(nq_data, es_data, nq_context, es_context)
+    # Get daily closes from prior days
+    for i in range(5):
+        prior_date = trade_date - timedelta(days=5-i)
+        try:
+            prior_nq = fetch_5min_data("NQ", prior_date)
+            prior_es = fetch_5min_data("ES", prior_date)
+            
+            if prior_nq is not None and len(prior_nq) > 0:
+                last_nq = prior_nq.iloc[-1]
+                nq_context.append({
+                    "date": prior_date.strftime('%Y-%m-%d'),
+                    "open": float(prior_nq.iloc[0]['open']),
+                    "high": float(prior_nq['high'].max()),
+                    "low": float(prior_nq['low'].min()),
+                    "close": float(last_nq['close']),
+                    "volume": int(prior_nq['volume'].sum())
+                })
+            
+            if prior_es is not None and len(prior_es) > 0:
+                last_es = prior_es.iloc[-1]
+                es_context.append({
+                    "date": prior_date.strftime('%Y-%m-%d'),
+                    "open": float(prior_es.iloc[0]['open']),
+                    "high": float(prior_es['high'].max()),
+                    "low": float(prior_es['low'].min()),
+                    "close": float(last_es['close']),
+                    "volume": int(prior_es['volume'].sum())
+                })
+        except:
+            pass
     
-    # Execute trade
-    pnl = 0
     portfolio = state['portfolio']
-    market = decision.get('market', 'NONE')
-    action = decision.get('action', 'HOLD')
     
-    selected_price = nq_data['close'] if market == "NQ" else es_data['close'] if market == "ES" else 0
+    # ENTRY PHASE: First 2 hours
+    if portfolio['position'] is None and len(nq_bars) >= 24:
+        entry_decision = get_ai_entry_decision(nq_bars, es_bars, nq_context, es_context)
+        
+        if entry_decision and entry_decision.get('action') in ['BUY', 'SELL']:
+            market = entry_decision.get('market', 'NQ')
+            action = entry_decision.get('action')
+            bars = nq_bars if market == 'NQ' else es_bars
+            entry_price = bars[23]['close']  # Entry at end of 2nd hour
+            
+            portfolio['position'] = 'LONG' if action == 'BUY' else 'SHORT'
+            portfolio['market'] = market
+            portfolio['entry_price'] = entry_price
+            portfolio['entry_bar_idx'] = 24
+            
+            print(f"[Trade] ENTRY: {action} {market} @ {entry_price:.2f}")
     
-    if action == 'BUY' and portfolio['position'] is None and market != 'NONE':
-        portfolio['position'] = 'LONG'
-        portfolio['market'] = market
-        portfolio['entry_price'] = selected_price
-        print(f"[Trade] BUY {market} @ {selected_price:.2f}")
-    
-    elif action == 'SELL' and portfolio['position'] == 'LONG' and portfolio['market'] == market:
-        pnl = selected_price - portfolio['entry_price']
-        portfolio['position'] = None
-        portfolio['market'] = None
-        state['daily_pnl'].append(pnl)
-        print(f"[Trade] SELL {market} @ {selected_price:.2f} | P&L: ${pnl:.2f}")
-    
-    else:
-        print(f"[Trade] HOLD")
-    
-    # Post to Discord
-    print(f"[Discord] Posting trade...")
-    embed = format_discord_embed(nq_data, es_data, decision, pnl, state)
-    post_to_discord(embed)
-    
-    # Store trade
-    state['trades'].append({
-        "date": nq_data['date'],
-        "market": market,
-        "action": action,
-        "price": selected_price,
-        "pnl": pnl
-    })
+    # EXIT PHASE: After entry, look for exit signal
+    if portfolio['position'] is not None:
+        market = portfolio['market']
+        bars = nq_bars if market == 'NQ' else es_bars
+        entry_bar_idx = portfolio['entry_bar_idx']
+        
+        # Check bars from entry onwards
+        for bar_idx in range(entry_bar_idx, len(bars)):
+            current_bar = bars[bar_idx]
+            bars_since_entry = bars[entry_bar_idx:bar_idx+1]
+            
+            exit_decision = get_ai_exit_decision(
+                portfolio['entry_price'],
+                market,
+                bars_since_entry,
+                current_bar
+            )
+            
+            if exit_decision.get('should_exit'):
+                exit_price = current_bar['close']
+                pnl = (exit_price - portfolio['entry_price']) if portfolio['position'] == 'LONG' else (portfolio['entry_price'] - exit_price)
+                
+                state['daily_pnl'].append(pnl)
+                
+                print(f"[Trade] EXIT: {market} @ {exit_price:.2f} | P&L: ${pnl:.2f}")
+                
+                # Post to Discord
+                embed = format_discord_embed(
+                    trade_date.strftime('%Y-%m-%d'),
+                    portfolio['entry_price'],
+                    exit_price,
+                    market,
+                    'BUY' if portfolio['position'] == 'LONG' else 'SELL',
+                    pnl,
+                    state
+                )
+                post_to_discord(embed)
+                
+                state['trades'].append({
+                    "date": trade_date.strftime('%Y-%m-%d'),
+                    "market": market,
+                    "entry_price": portfolio['entry_price'],
+                    "exit_price": exit_price,
+                    "pnl": pnl
+                })
+                
+                portfolio['position'] = None
+                portfolio['market'] = None
+                break
+        
+        # If no exit signal by end of day, force exit at close
+        if portfolio['position'] is not None:
+            exit_price = bars[-1]['close']
+            pnl = (exit_price - portfolio['entry_price']) if portfolio['position'] == 'LONG' else (portfolio['entry_price'] - exit_price)
+            
+            state['daily_pnl'].append(pnl)
+            
+            print(f"[Trade] FORCE EXIT (EOD): {market} @ {exit_price:.2f} | P&L: ${pnl:.2f}")
+            
+            embed = format_discord_embed(
+                trade_date.strftime('%Y-%m-%d'),
+                portfolio['entry_price'],
+                exit_price,
+                market,
+                'BUY' if portfolio['position'] == 'LONG' else 'SELL',
+                pnl,
+                state
+            )
+            post_to_discord(embed)
+            
+            state['trades'].append({
+                "date": trade_date.strftime('%Y-%m-%d'),
+                "market": market,
+                "entry_price": portfolio['entry_price'],
+                "exit_price": exit_price,
+                "pnl": pnl
+            })
+            
+            portfolio['position'] = None
+            portfolio['market'] = None
     
     # Move to next day
-    next_date = current_date + timedelta(days=1)
+    next_date = trade_date + timedelta(days=1)
     state['current_date'] = next_date.strftime('%Y-%m-%d')
     save_state(state)
     
-    print(f"[Hermes] {current_date.strftime('%Y-%m-%d')} complete. Next: {next_date.strftime('%Y-%m-%d')}")
+    print(f"[Hermes] {trade_date.strftime('%Y-%m-%d')} complete. Next: {next_date.strftime('%Y-%m-%d')}")
 
 if __name__ == "__main__":
     main()
