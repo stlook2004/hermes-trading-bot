@@ -57,14 +57,13 @@ def fetch_and_aggregate_5min_data(symbol: str, trade_date: datetime):
             return None
         
         print(f"[Databento] Retrieved {len(df)} 1-min bars for {symbol}")
-        print(f"[Databento] Columns: {df.columns.tolist()}")
         
-        # Use the index as timestamp (it's the time column)
+        # The index is the timestamp, use it for aggregation
+        df.index.name = 'time'
         df = df.reset_index()
-        df = df.sort_values('ts_event').reset_index(drop=True)
         
-        # Aggregate to 5-minute bars
-        df['time_5m'] = df['ts_event'].dt.floor('5min')
+        # Aggregate to 5-minute bars using the time column
+        df['time_5m'] = df['time'].dt.floor('5min')
         bars_5m = df.groupby('time_5m').agg({
             'open': 'first',
             'high': 'max',
