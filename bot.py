@@ -44,63 +44,40 @@ def get_ai_trade_decision(symbol: str, current_day_data: dict, historical_contex
     
     context_str = ""
     if len(historical_context) > 0:
-        # Show last 5 days of context
-        recent_days = historical_context[-5:]
+        # Show last 10 days of context
+        recent_days = historical_context[-10:]
         context_str = "\n".join([
-            f"Day {d['day_num']}: Open=${d['open']:.2f}, High=${d['high']:.2f}, Low=${d['low']:.2f}, Close=${d['close']:.2f}, Volume={d['volume']}"
+            f"Day {d['day_num']}: O=${d['open']:.2f} H=${d['high']:.2f} L=${d['low']:.2f} C=${d['close']:.2f}"
             for d in recent_days
         ])
     
-    prompt = f"""You are a day trader analyzing {symbol}. 
+    prompt = f"""You are a day trader analyzing {symbol}. Make a quick decision.
 
-Current Day: {day_num}/{total_days}
-Date: {current_day_data['date']}
+Day {day_num}/{total_days} ({current_day_data['date']})
+Today: O=${current_day_data['open']:.2f} H=${current_day_data['high']:.2f} L=${current_day_data['low']:.2f} C=${current_day_data['close']:.2f} V={current_day_data['volume']}
 
-CURRENT DAY DATA:
-Open: ${current_day_data['open']:.2f}
-High: ${current_day_data['high']:.2f}
-Low: ${current_day_data['low']:.2f}
-Close: ${current_day_data['close']:.2f}
-Volume: {current_day_data['volume']}
+Recent: {context_str if context_str else "No prior data"}
 
-RECENT PRICE HISTORY (Last 5 days):
-{context_str if context_str else "No prior data"}
-
-Based on this data, make a trading decision. Respond ONLY with valid JSON:
-{{
-  "action": "BUY" or "SELL" or "HOLD",
-  "confidence": 0.0 to 1.0,
-  "reasoning": "brief explanation",
-  "entry_price": {current_day_data['close']},
-  "stop_loss": number or null,
-  "take_profit": number or null
-}}"""
+Respond ONLY with JSON:
+{{"action": "BUY"|"SELL"|"HOLD", "confidence": 0.0-1.0, "reason": "brief"}}"""
 
     message = client.messages.create(
         model="claude-3-5-sonnet-20241022",
-        max_tokens=300,
+        max_tokens=150,
         messages=[{"role": "user", "content": prompt}]
     )
     
     try:
         response_text = message.content[0].text
-        # Extract JSON from response
         start_idx = response_text.find('{')
         end_idx = response_text.rfind('}') + 1
         if start_idx != -1 and end_idx > start_idx:
             json_str = response_text[start_idx:end_idx]
             return json.loads(json_str)
     except Exception as e:
-        print(f"[Error] Failed to parse AI response: {e}")
+        pass
     
-    return {
-        "action": "HOLD",
-        "confidence": 0.5,
-        "reasoning": "Unable to analyze",
-        "entry_price": current_day_data['close'],
-        "stop_loss": None,
-        "take_profit": None
-    }
+    return {"action": "HOLD", "confidence": 0.5, "reason": "parse error"}
 
 def run_daily_backtest(symbol: str, df):
     """Run day-by-day backtest with AI making decisions"""
@@ -109,7 +86,7 @@ def run_daily_backtest(symbol: str, df):
     
     results = []
     historical_context = []
-    portfolio = {"position": None, "entry_price": 0, "shares": 1}
+    portfolio = {"position": None, "entry_price": 0}
     daily_pnl = []
     
     print(f"\n[{symbol}] Starting day-by-day backtest ({len(df)} days)...")
@@ -119,6 +96,7 @@ def run_daily_backtest(symbol: str, df):
         
         # Prepare current day data
         current_day = {
+            "day_num": day_num,
             "date": pd.Timestamp(row['ts_event']).strftime('%Y-%m-%d'),
             "open": float(row['open']),
             "high": float(row['high']),
@@ -132,41 +110,37 @@ def run_daily_backtest(symbol: str, df):
         
         # Execute trade
         pnl = 0
-        if decision['action'] == 'BUY' and portfolio['position'] is None:
+        action_result = "HOLD"
+        
+        if decision.get('action') == 'BUY' and portfolio['position'] is None:
             portfolio['position'] = 'LONG'
             portfolio['entry_price'] = current_day['close']
             action_result = f"BUY @ ${current_day['close']:.2f}"
         
-        elif decision['action'] == 'SELL' and portfolio['position'] == 'LONG':
-            pnl = (current_day['close'] - portfolio['entry_price']) * portfolio['shares']
+        elif decision.get('action') == 'SELL' and portfolio['position'] == 'LONG':
+            pnl = current_day['close'] - portfolio['entry_price']
             portfolio['position'] = None
             action_result = f"SELL @ ${current_day['close']:.2f} | P&L: ${pnl:.2f}"
             daily_pnl.append(pnl)
-        
-        else:
-            action_result = "HOLD"
         
         # Store result
         result = {
             "day": day_num,
             "date": current_day['date'],
-            "symbol": symbol,
-            "action": decision['action'],
-            "confidence": decision['confidence'],
+            "action": decision.get('action', 'HOLD'),
             "price": current_day['close'],
-            "reasoning": decision['reasoning'],
             "pnl": pnl,
-            "action_result": action_result
+            "result": action_result
         }
         results.append(result)
         
         # Add to historical context
         historical_context.append(current_day)
         
-        # Print progress every 50 days
-        if day_num % 50 == 0 or day_num == len(df):
+        # Print progress every 100 days
+        if day_num % 100 == 0 or day_num == len(df):
             total_pnl = sum(daily_pnl)
-            print(f"[{symbol}] Day {day_num}/{len(df)} | Total P&L: ${total_pnl:.2f} | Trades: {len(daily_pnl)}")
+            print(f"[{symbol}] Day {day_num}/{len(df)} | P&L: ${total_pnl:.2f} | Trades: {len(daily_pnl)}")
     
     # Calculate final metrics
     total_pnl = sum(daily_pnl)
@@ -182,7 +156,7 @@ def run_daily_backtest(symbol: str, df):
         "winning_trades": winning_trades,
         "win_rate": round(win_rate, 2),
         "avg_trade": round(total_pnl / num_trades, 2) if num_trades > 0 else 0,
-        "daily_results": results[-10:]  # Last 10 days
+        "daily_results": results[-20:]  # Last 20 days
     }
 
 def main():
@@ -206,10 +180,10 @@ def main():
             print(f"  Win Rate: {result['win_rate']}%")
             print(f"  Avg Trade: ${result['avg_trade']}")
             
-            # Print last 10 days
-            print(f"\n  Last 10 Days:")
+            # Print last 20 days
+            print(f"\n  Last 20 Days:")
             for daily in result['daily_results']:
-                print(f"    {daily['date']} | {daily['action']:4s} @ ${daily['price']:7.2f} | {daily['action_result']}")
+                print(f"    {daily['date']} | {daily['action']:4s} @ ${daily['price']:7.2f} | {daily['result']}")
     
     # Summary
     if all_results:
