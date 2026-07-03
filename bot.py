@@ -56,8 +56,12 @@ def fetch_and_aggregate_5min_data(symbol: str, trade_date: datetime):
             print(f"[Databento] No data for {symbol} on {trade_date.date()}")
             return None
         
-        df = df.sort_values('ts_event').reset_index(drop=True)
         print(f"[Databento] Retrieved {len(df)} 1-min bars for {symbol}")
+        print(f"[Databento] Columns: {df.columns.tolist()}")
+        
+        # Use the index as timestamp (it's the time column)
+        df = df.reset_index()
+        df = df.sort_values('ts_event').reset_index(drop=True)
         
         # Aggregate to 5-minute bars
         df['time_5m'] = df['ts_event'].dt.floor('5min')
@@ -73,6 +77,8 @@ def fetch_and_aggregate_5min_data(symbol: str, trade_date: datetime):
         return bars_5m
     except Exception as e:
         print(f"[Error] Failed to fetch {symbol} data: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def get_ai_entry_decision(nq_bars: list, es_bars: list, nq_context: list, es_context: list) -> dict:
