@@ -100,12 +100,12 @@ def get_ai_entry_decision(nq_bars: list, es_bars: list, nq_context: list, es_con
     nq_context_str = "\n".join([
         f"{d['date']}: O={d['open']:.2f} H={d['high']:.2f} L={d['low']:.2f} C={d['close']:.2f}"
         for d in nq_context[-5:]  # Last 5 days
-    ])
+    ]) if nq_context else "No data"
     
     es_context_str = "\n".join([
         f"{d['date']}: O={d['open']:.2f} H={d['high']:.2f} L={d['low']:.2f} C={d['close']:.2f}"
         for d in es_context[-5:]  # Last 5 days
-    ])
+    ]) if es_context else "No data"
     
     prompt = f"""Analyze early trading action (first 2 hours) and pick ONE intraday trade to ENTER now.
 
@@ -119,8 +119,8 @@ ES:
 
 PRIOR 5 DAYS CONTEXT:
 
-NQ: {nq_context_str if nq_context_str else "No data"}
-ES: {es_context_str if es_context_str else "No data"}
+NQ: {nq_context_str}
+ES: {es_context_str}
 
 Pick ONE market (NQ or ES) and BUY or SELL based on early momentum. You will close this trade later in the day.
 
@@ -128,37 +128,47 @@ Respond ONLY as JSON:
 {{"market": "NQ"|"ES", "action": "BUY"|"SELL", "entry_reason": "one sentence", "confidence": 0.0-1.0}}"""
 
     try:
+        print(f"[Claude] Sending prompt ({len(prompt)} chars)...")
         message = client.messages.create(
             model="claude-sonnet-5",
             max_tokens=150,
             messages=[{"role": "user", "content": prompt}]
         )
         
+        print(f"[Claude] Response received. Content length: {len(message.content)}")
+        print(f"[Claude] Message object: {message}")
+        
         if not message.content or len(message.content) == 0:
-            print("[Error] Empty response from Claude")
+            print("[Error] Empty content array from Claude")
             return None
         
+        print(f"[Claude] Content[0] type: {type(message.content[0])}")
+        print(f"[Claude] Content[0]: {message.content[0]}")
+        
         response_text = message.content[0].text
+        
+        print(f"[Claude] Response text: {response_text}")
         
         if not response_text:
             print("[Error] No text in Claude response")
             return None
         
-        print(f"[Claude] Entry decision: {response_text}")
-        
         start_idx = response_text.find('{')
         end_idx = response_text.rfind('}') + 1
         
         if start_idx == -1 or end_idx <= start_idx:
-            print(f"[Error] No JSON found in response")
+            print(f"[Error] No JSON found in response: {response_text}")
             return None
         
         json_str = response_text[start_idx:end_idx]
         result = json.loads(json_str)
+        print(f"[Claude] Parsed decision: {result}")
         return result
         
     except Exception as e:
         print(f"[Error] Failed to get entry decision: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def get_ai_exit_decision(entry_price: float, market: str, bars_since_entry: list, current_bar: dict) -> dict:
@@ -341,6 +351,7 @@ def main():
     
     # ENTRY PHASE: First 2 hours
     if portfolio['position'] is None and len(nq_bars) >= 24:
+        print("[Hermes] Calling AI for entry decision...")
         entry_decision = get_ai_entry_decision(nq_bars, es_bars, nq_context, es_context)
         
         if entry_decision and entry_decision.get('action') in ['BUY', 'SELL']:
@@ -355,6 +366,8 @@ def main():
             portfolio['entry_bar_idx'] = 24
             
             print(f"[Trade] ENTRY: {action} {market} @ {entry_price:.2f}")
+        else:
+            print(f"[Hermes] No entry decision made. Decision: {entry_decision}")
     
     # EXIT PHASE: After entry, look for exit signal
     if portfolio['position'] is not None:
