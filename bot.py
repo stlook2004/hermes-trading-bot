@@ -121,15 +121,18 @@ Pick ONE trade: NQ or ES, BUY/SELL/HOLD. Respond ONLY as JSON:
         return {"market": "NONE", "action": "HOLD", "confidence": 0.5, "reason": "api error"}
 
 def load_state():
-    """Load current state from file"""
-    state_file = "/tmp/hermes_state.json"
+    """Load current state from persistent volume"""
+    state_file = "/data/hermes_state.json"
     if os.path.exists(state_file):
         try:
             with open(state_file, 'r') as f:
-                return json.load(f)
-        except:
-            pass
+                state = json.load(f)
+                print(f"[State] Loaded state from {state_file}: current_date={state.get('current_date')}")
+                return state
+        except Exception as e:
+            print(f"[Error] Failed to load state: {e}")
     
+    print("[State] No state file found, starting fresh from 2020-07-04")
     return {
         "current_date": "2020-07-04",
         "portfolio": {"position": None, "market": None, "entry_price": 0},
@@ -138,10 +141,14 @@ def load_state():
     }
 
 def save_state(state):
-    """Save current state to file"""
-    state_file = "/tmp/hermes_state.json"
-    with open(state_file, 'w') as f:
-        json.dump(state, f)
+    """Save current state to persistent volume"""
+    state_file = "/data/hermes_state.json"
+    try:
+        with open(state_file, 'w') as f:
+            json.dump(state, f)
+        print(f"[State] Saved state to {state_file}: current_date={state.get('current_date')}")
+    except Exception as e:
+        print(f"[Error] Failed to save state: {e}")
 
 def format_discord_embed(nq_data, es_data, decision, pnl, state):
     """Format single trade as Discord embed"""
