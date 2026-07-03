@@ -56,7 +56,6 @@ def fetch_futures_data(symbol: str, days_back: int = 2190):
         df = data.to_df()
         df = df.sort_values('ts_event').reset_index(drop=True)
         print(f"[Databento] Retrieved {len(df)} bars for {symbol}")
-        print(f"[Databento] Columns: {df.columns.tolist()}")
         return df
     except Exception as e:
         print(f"[Error] Failed to fetch {symbol} data: {e}")
@@ -115,7 +114,7 @@ Respond ONLY with JSON:
 {{"market": "NQ"|"ES", "action": "BUY"|"SELL"|"HOLD", "confidence": 0.0-1.0, "reason": "brief explanation of why this market and action"}}"""
 
     message = client.messages.create(
-        model="claude-3-5-sonnet-20241022",
+        model="claude-3-5-sonnet-20250514",
         max_tokens=200,
         messages=[{"role": "user", "content": prompt}]
     )
