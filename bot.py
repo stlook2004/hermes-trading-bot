@@ -114,7 +114,7 @@ Respond ONLY with JSON:
 {{"market": "NQ"|"ES", "action": "BUY"|"SELL"|"HOLD", "confidence": 0.0-1.0, "reason": "brief explanation of why this market and action"}}"""
 
     message = client.messages.create(
-        model="claude-3-5-sonnet-20250514",
+        model="claude-3-5-sonnet-20241022",
         max_tokens=200,
         messages=[{"role": "user", "content": prompt}]
     )
