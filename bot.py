@@ -175,46 +175,7 @@ class TradingBot:
             return []
 
 
-    def fetch_bars(self, symbol: str, dataset: str, start_date: str, end_date: str) -> List[Dict]:
-        if not db or not DATABENTO_API_KEY:
-            logger.warning("databento not installed or API key missing")
-            return []
-
-    try:
-        client = db.Historical(key=DATABENTO_API_KEY)
-        data = client.timeseries.get_range(
-            dataset=dataset,
-            symbols=[symbol],
-            schema="ohlcv-1m",
-            start=start_date,
-            end=end_date,
-        )
-        
-        bars = []
-        for i, record in enumerate(data):
-            if i == 0:
-                logger.info(f"DEBUG: First record type: {type(record)}")
-                logger.info(f"DEBUG: First record dir: {[attr for attr in dir(record) if not attr.startswith('_')]}")
-                logger.info(f"DEBUG: First record values - ts_event: {record.ts_event}, open: {record.open}, close: {record.close}")
-            
-            bars.append({
-                "ts": record.ts_event,
-                "open": record.open,
-                "high": record.high,
-                "low": record.low,
-                "close": record.close,
-                "volume": record.volume,
-            })
-        
-        bars.sort(key=lambda x: x["ts"])
-        logger.info(f"Fetched {len(bars)} 1-minute bars for {symbol}")
-        return bars
-    except Exception as e:
-        logger.error(f"Error fetching bars: {e}")
-        return []
-
-    
-
+   
     def compute_ema(self, closes: List[float], period: int) -> Optional[float]:
         if len(closes) < period:
             return None
