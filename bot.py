@@ -30,8 +30,8 @@ def post_to_discord(embed_data):
     except Exception as e:
         print(f"[Discord] Error posting: {e}")
 
-def fetch_historical_data(symbol: str, days_back: int = 2190):
-    """Fetch 6 years of historical data from Databento"""
+def fetch_futures_data(symbol: str, days_back: int = 2190):
+    """Fetch 6 years of historical futures data from Databento"""
     try:
         hist_client = db.Historical(databento_key)
         
@@ -41,8 +41,9 @@ def fetch_historical_data(symbol: str, days_back: int = 2190):
         print(f"[Databento] Fetching {symbol} from {start_date.date()} to {end_date.date()}")
         
         # Get OHLCV data (daily bars)
+        # NQ = Nasdaq 100 Mini, ES = S&P 500 Mini
         data = hist_client.timeseries.get_range(
-            dataset="XNAS.ITCH",
+            dataset="XNAS.ITCH" if symbol == "NQ" else "XCME.ITCH",
             symbols=symbol,
             stype_in="parent",
             start=start_date.isoformat(),
@@ -56,39 +57,64 @@ def fetch_historical_data(symbol: str, days_back: int = 2190):
         print(f"[Databento] Retrieved {len(df)} bars for {symbol}")
         return df
     except Exception as e:
-        print(f"[Error] Failed to fetch data: {e}")
+        print(f"[Error] Failed to fetch {symbol} data: {e}")
         return None
 
-def get_ai_trade_decision(symbol: str, current_day_data: dict, historical_context: list) -> dict:
-    """Use Claude to analyze current day and make a trade decision"""
+def get_ai_trade_decision(nq_data: dict, es_data: dict, nq_context: list, es_context: list) -> dict:
+    """Use Claude to analyze both NQ and ES and pick the best trade"""
     
-    context_str = ""
-    if len(historical_context) > 0:
-        # Show last 10 days of context
-        recent_days = historical_context[-10:]
-        context_str = "\n".join([
-            f"{d['date']}: O=${d['open']:.2f} H=${d['high']:.2f} L=${d['low']:.2f} C=${d['close']:.2f}"
+    nq_context_str = ""
+    if len(nq_context) > 0:
+        recent_days = nq_context[-10:]
+        nq_context_str = "\n".join([
+            f"{d['date']}: O={d['open']:.2f} H={d['high']:.2f} L={d['low']:.2f} C={d['close']:.2f}"
             for d in recent_days
         ])
     
-    prompt = f"""You are a day trader analyzing {symbol}. 
+    es_context_str = ""
+    if len(es_context) > 0:
+        recent_days = es_context[-10:]
+        es_context_str = "\n".join([
+            f"{d['date']}: O={d['open']:.2f} H={d['high']:.2f} L={d['low']:.2f} C={d['close']:.2f}"
+            for d in recent_days
+        ])
+    
+    prompt = f"""You are a futures trader managing a single account. Analyze both NQ (Nasdaq 100 Mini) and ES (S&P 500 Mini) for today and pick the BEST trade opportunity.
 
-TODAY ({current_day_data['date']}):
-Open: ${current_day_data['open']:.2f}
-High: ${current_day_data['high']:.2f}
-Low: ${current_day_data['low']:.2f}
-Close: ${current_day_data['close']:.2f}
-Volume: {current_day_data['volume']}
+TODAY'S DATA:
 
-LAST 10 DAYS:
-{context_str if context_str else "No prior data"}
+NQ (Nasdaq 100 Mini):
+Open: {nq_data['open']:.2f}
+High: {nq_data['high']:.2f}
+Low: {nq_data['low']:.2f}
+Close: {nq_data['close']:.2f}
+Volume: {nq_data['volume']}
 
-Make a trading decision. Respond ONLY with JSON:
-{{"action": "BUY"|"SELL"|"HOLD", "confidence": 0.0-1.0, "reason": "brief explanation"}}"""
+ES (S&P 500 Mini):
+Open: {es_data['open']:.2f}
+High: {es_data['high']:.2f}
+Low: {es_data['low']:.2f}
+Close: {es_data['close']:.2f}
+Volume: {es_data['volume']}
+
+NQ LAST 10 DAYS:
+{nq_context_str if nq_context_str else "No prior data"}
+
+ES LAST 10 DAYS:
+{es_context_str if es_context_str else "No prior data"}
+
+Analyze both markets and pick the SINGLE BEST trade for today. Consider:
+- Momentum and trend strength
+- Volume patterns
+- Relative strength between markets
+- Risk/reward setup
+
+Respond ONLY with JSON:
+{{"market": "NQ"|"ES", "action": "BUY"|"SELL"|"HOLD", "confidence": 0.0-1.0, "reason": "brief explanation of why this market and action"}}"""
 
     message = client.messages.create(
         model="claude-3-5-sonnet-20241022",
-        max_tokens=150,
+        max_tokens=200,
         messages=[{"role": "user", "content": prompt}]
     )
     
@@ -100,9 +126,9 @@ Make a trading decision. Respond ONLY with JSON:
             json_str = response_text[start_idx:end_idx]
             return json.loads(json_str)
     except Exception as e:
-        pass
+        print(f"[Error] Failed to parse AI response: {e}")
     
-    return {"action": "HOLD", "confidence": 0.5, "reason": "parse error"}
+    return {"market": "NONE", "action": "HOLD", "confidence": 0.5, "reason": "parse error"}
 
 def load_state():
     """Load current state from file"""
@@ -116,7 +142,7 @@ def load_state():
     
     return {
         "current_day_index": 0,
-        "portfolio": {"position": None, "entry_price": 0},
+        "portfolio": {"position": None, "market": None, "entry_price": 0},
         "daily_pnl": [],
         "trades": []
     }
@@ -127,7 +153,7 @@ def save_state(state):
     with open(state_file, 'w') as f:
         json.dump(state, f)
 
-def format_discord_embed(symbol, current_day, decision, pnl, state):
+def format_discord_embed(nq_data, es_data, decision, pnl, state):
     """Format single trade as Discord embed"""
     
     # Calculate stats
@@ -144,18 +170,34 @@ def format_discord_embed(symbol, current_day, decision, pnl, state):
     }
     
     action = decision.get('action', 'HOLD')
+    market = decision.get('market', 'NONE')
     color = color_map.get(action, 0x999999)
     
-    # Build trade description
-    if action == "BUY":
-        trade_desc = f"🟢 **BUY** @ ${current_day['close']:.2f}"
-    elif action == "SELL":
-        trade_desc = f"🔴 **SELL** @ ${current_day['close']:.2f}\nP&L: ${pnl:.2f}"
+    # Get the traded market data
+    if market == "NQ":
+        traded_data = nq_data
+        market_name = "NQ (Nasdaq 100 Mini)"
+    elif market == "ES":
+        traded_data = es_data
+        market_name = "ES (S&P 500 Mini)"
     else:
-        trade_desc = f"⚪ **HOLD** @ ${current_day['close']:.2f}"
+        traded_data = None
+        market_name = "NONE"
+    
+    # Build trade description
+    if action == "BUY" and market != "NONE":
+        trade_desc = f"🟢 **BUY {market}** @ {traded_data['close']:.2f}"
+    elif action == "SELL" and market != "NONE":
+        trade_desc = f"🔴 **SELL {market}** @ {traded_data['close']:.2f}\nP&L: ${pnl:.2f}"
+    else:
+        trade_desc = f"⚪ **HOLD** - No trade"
+    
+    # Build market comparison
+    market_comp = f"""**NQ**: O={nq_data['open']:.2f} H={nq_data['high']:.2f} L={nq_data['low']:.2f} C={nq_data['close']:.2f}
+**ES**: O={es_data['open']:.2f} H={es_data['high']:.2f} L={es_data['low']:.2f} C={es_data['close']:.2f}"""
     
     embed = {
-        "title": f"📈 {symbol} - {current_day['date']}",
+        "title": f"📊 Futures Trading - {nq_data['date']}",
         "color": color,
         "fields": [
             {
@@ -164,8 +206,8 @@ def format_discord_embed(symbol, current_day, decision, pnl, state):
                 "inline": False
             },
             {
-                "name": "Daily Data",
-                "value": f"O: ${current_day['open']:.2f} | H: ${current_day['high']:.2f} | L: ${current_day['low']:.2f} | C: ${current_day['close']:.2f}\nVolume: {current_day['volume']:,}",
+                "name": "Market Data",
+                "value": market_comp,
                 "inline": False
             },
             {
@@ -174,7 +216,7 @@ def format_discord_embed(symbol, current_day, decision, pnl, state):
                 "inline": False
             },
             {
-                "name": "Portfolio Stats",
+                "name": "Account Stats",
                 "value": f"Total P&L: ${total_pnl:.2f}\nTrades: {num_trades}\nWin Rate: {win_rate:.1f}%",
                 "inline": False
             }
@@ -187,89 +229,118 @@ def format_discord_embed(symbol, current_day, decision, pnl, state):
     return embed
 
 def main():
-    print("[Hermes] Starting daily trade cycle...")
+    print("[Hermes] Starting daily futures trade cycle...")
     
     # Load state
     state = load_state()
     current_day_index = state['current_day_index']
     
-    symbols = ["AAPL", "MSFT", "NVDA"]
+    print(f"\n[Hermes] Processing day {current_day_index + 1}...")
     
-    for symbol in symbols:
-        print(f"\n[{symbol}] Processing day {current_day_index + 1}...")
-        
-        # Fetch all historical data
-        df = fetch_historical_data(symbol, days_back=2190)
-        
-        if df is None or len(df) == 0:
-            print(f"[{symbol}] No data available")
-            continue
-        
-        # Check if we've reached the end
-        if current_day_index >= len(df):
-            print(f"[{symbol}] Backtest complete! Resetting to day 1")
-            state['current_day_index'] = 0
-            current_day_index = 0
-        
-        # Get current day data
-        row = df.iloc[current_day_index]
-        current_day = {
-            "date": pd.Timestamp(row['ts_event']).strftime('%Y-%m-%d'),
-            "open": float(row['open']),
-            "high": float(row['high']),
-            "low": float(row['low']),
-            "close": float(row['close']),
-            "volume": int(row['volume'])
-        }
-        
-        # Get historical context (last 10 days)
-        start_idx = max(0, current_day_index - 10)
-        historical_context = []
-        for i in range(start_idx, current_day_index):
-            hist_row = df.iloc[i]
-            historical_context.append({
-                "date": pd.Timestamp(hist_row['ts_event']).strftime('%Y-%m-%d'),
-                "open": float(hist_row['open']),
-                "high": float(hist_row['high']),
-                "low": float(hist_row['low']),
-                "close": float(hist_row['close']),
-                "volume": int(hist_row['volume'])
-            })
-        
-        # Get AI decision
-        decision = get_ai_trade_decision(symbol, current_day, historical_context)
-        
-        # Execute trade
-        pnl = 0
-        portfolio = state['portfolio']
-        
-        if decision.get('action') == 'BUY' and portfolio['position'] is None:
-            portfolio['position'] = 'LONG'
-            portfolio['entry_price'] = current_day['close']
-            print(f"[{symbol}] BUY @ ${current_day['close']:.2f}")
-        
-        elif decision.get('action') == 'SELL' and portfolio['position'] == 'LONG':
-            pnl = current_day['close'] - portfolio['entry_price']
-            portfolio['position'] = None
-            state['daily_pnl'].append(pnl)
-            print(f"[{symbol}] SELL @ ${current_day['close']:.2f} | P&L: ${pnl:.2f}")
-        
-        else:
-            print(f"[{symbol}] HOLD @ ${current_day['close']:.2f}")
-        
-        # Post to Discord
-        print(f"[Discord] Posting {symbol} trade...")
-        embed = format_discord_embed(symbol, current_day, decision, pnl, state)
-        post_to_discord(embed)
-        
-        # Store trade
-        state['trades'].append({
-            "date": current_day['date'],
-            "symbol": symbol,
-            "action": decision.get('action', 'HOLD'),
-            "price": current_day['close'],
-            "pnl": pnl
+    # Fetch all historical data for both markets
+    nq_df = fetch_futures_data("NQ", days_back=2190)
+    es_df = fetch_futures_data("ES", days_back=2190)
+    
+    if nq_df is None or es_df is None or len(nq_df) == 0 or len(es_df) == 0:
+        print("[Error] Failed to fetch futures data")
+        return
+    
+    # Check if we've reached the end
+    if current_day_index >= len(nq_df):
+        print("[Hermes] Backtest complete! Resetting to day 1")
+        state['current_day_index'] = 0
+        current_day_index = 0
+    
+    # Get current day data for both markets
+    nq_row = nq_df.iloc[current_day_index]
+    es_row = es_df.iloc[current_day_index]
+    
+    nq_data = {
+        "date": pd.Timestamp(nq_row['ts_event']).strftime('%Y-%m-%d'),
+        "open": float(nq_row['open']),
+        "high": float(nq_row['high']),
+        "low": float(nq_row['low']),
+        "close": float(nq_row['close']),
+        "volume": int(nq_row['volume'])
+    }
+    
+    es_data = {
+        "date": pd.Timestamp(es_row['ts_event']).strftime('%Y-%m-%d'),
+        "open": float(es_row['open']),
+        "high": float(es_row['high']),
+        "low": float(es_row['low']),
+        "close": float(es_row['close']),
+        "volume": int(es_row['volume'])
+    }
+    
+    # Get historical context (last 10 days)
+    start_idx = max(0, current_day_index - 10)
+    
+    nq_context = []
+    for i in range(start_idx, current_day_index):
+        hist_row = nq_df.iloc[i]
+        nq_context.append({
+            "date": pd.Timestamp(hist_row['ts_event']).strftime('%Y-%m-%d'),
+            "open": float(hist_row['open']),
+            "high": float(hist_row['high']),
+            "low": float(hist_row['low']),
+            "close": float(hist_row['close']),
+            "volume": int(hist_row['volume'])
         })
+    
+    es_context = []
+    for i in range(start_idx, current_day_index):
+        hist_row = es_df.iloc[i]
+        es_context.append({
+            "date": pd.Timestamp(hist_row['ts_event']).strftime('%Y-%m-%d'),
+            "open": float(hist_row['open']),
+            "high": float(hist_row['high']),
+            "low": float(hist_row['low']),
+            "close": float(hist_row['close']),
+            "volume": int(hist_row['volume'])
+        })
+    
+    # Get AI decision (picks best market and action)
+    decision = get_ai_trade_decision(nq_data, es_data, nq_context, es_context)
+    
+    # Execute trade on the selected market
+    pnl = 0
+    portfolio = state['portfolio']
+    market = decision.get('market', 'NONE')
+    action = decision.get('action', 'HOLD')
+    
+    # Get the price of the selected market
+    selected_price = nq_data['close'] if market == "NQ" else es_data['close'] if market == "ES" else 0
+    
+    if action == 'BUY' and portfolio['position'] is None and market != 'NONE':
+        portfolio['position'] = 'LONG'
+        portfolio['market'] = market
+        portfolio['entry_price'] = selected_price
+        print(f"[Trade] BUY {market} @ {selected_price:.2f}")
+    
+    elif action == 'SELL' and portfolio['position'] == 'LONG' and portfolio['market'] == market:
+        pnl = selected_price - portfolio['entry_price']
+        portfolio['position'] = None
+        portfolio['market'] = None
+        state['daily_pnl'].append(pnl)
+        print(f"[Trade] SELL {market} @ {selected_price:.2f} | P&L: ${pnl:.2f}")
+    
+    else:
+        print(f"[Trade] HOLD")
+    
+    # Post to Discord
+    print(f"[Discord] Posting trade...")
+    embed = format_discord_embed(nq_data, es_data, decision, pnl, state)
+    post_to_discord(embed)
+    
+    # Store trade
+    state['trades'].append({
+        "date": nq_data['date'],
+        "market": market,
+        "action": action,
+        "price": selected_price,
+        "pnl": pnl
+    })
     
     # Increment day counter
     state['current_day_index'] += 1
