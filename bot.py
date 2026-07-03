@@ -130,7 +130,7 @@ class TradingBot:
             cost = client.metadata.get_cost(
                 dataset=dataset,
                 symbols=[symbol],
-                schema="ohlcv-1m",
+                schema="ohlcv-5m",
                 start=start_date,
                 end=end_date,
             )
@@ -151,7 +151,7 @@ class TradingBot:
             data = client.timeseries.get_range(
                 dataset=dataset,
                 symbols=[symbol],
-                schema="ohlcv-1m",
+                schema="ohlcv-5m",
                 start=start_date,
                 end=end_date,
             )
@@ -636,13 +636,42 @@ class TradingBot:
 
 
 def main():
+    from datetime import datetime, timedelta
+    
     symbol = os.getenv("TRADING_SYMBOL", "ES")
     dataset = os.getenv("TRADING_DATASET", "XNAS.ITCH")
-    start_date = os.getenv("TRADING_START_DATE", "2024-01-01")
-    end_date = os.getenv("TRADING_END_DATE", "2024-01-31")
     
-    bot = TradingBot()
-    bot.run(symbol, dataset, start_date, end_date)
+    # Loop from 2020-01-01 forward, one month at a time
+    start_date = datetime(2020, 1, 1)
+    end_date = datetime(2026, 7, 3)  # Current date
+    
+    current = start_date
+    while current < end_date:
+        # Calculate month end
+        if current.month == 12:
+            month_end = datetime(current.year + 1, 1, 1) - timedelta(days=1)
+        else:
+            month_end = datetime(current.year, current.month + 1, 1) - timedelta(days=1)
+        
+        # Don't go past end_date
+        if month_end > end_date:
+            month_end = end_date
+        
+        start_str = current.strftime("%Y-%m-%d")
+        end_str = month_end.strftime("%Y-%m-%d")
+        
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Backtesting {start_str} to {end_str}")
+        logger.info(f"{'='*60}\n")
+        
+        bot = TradingBot()
+        bot.run(symbol, dataset, start_str, end_str)
+        
+        # Move to next month
+        if month_end.month == 12:
+            current = datetime(month_end.year + 1, 1, 1)
+        else:
+            current = datetime(month_end.year, month_end.month + 1, 1)
 
 
 if __name__ == "__main__":
