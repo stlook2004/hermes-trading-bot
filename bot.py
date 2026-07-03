@@ -176,9 +176,9 @@ class TradingBot:
 
 
     def fetch_bars(self, symbol: str, dataset: str, start_date: str, end_date: str) -> List[Dict]:
-    if not db or not DATABENTO_API_KEY:
-        logger.warning("databento not installed or API key missing")
-        return []
+        if not db or not DATABENTO_API_KEY:
+            logger.warning("databento not installed or API key missing")
+            return []
 
     try:
         client = db.Historical(key=DATABENTO_API_KEY)
