@@ -82,23 +82,43 @@ ES PRIOR 10 DAYS:
 Pick ONE trade: NQ or ES, BUY/SELL/HOLD. Respond ONLY as JSON:
 {{"market": "NQ"|"ES", "action": "BUY"|"SELL"|"HOLD", "confidence": 0.0-1.0, "reason": "one sentence"}}"""
 
-    message = client.messages.create(
-        model="claude-sonnet-5",
-        max_tokens=150,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    
     try:
+        message = client.messages.create(
+            model="claude-sonnet-5",
+            max_tokens=150,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        
+        if not message.content or len(message.content) == 0:
+            print("[Error] Empty response from Claude")
+            return {"market": "NONE", "action": "HOLD", "confidence": 0.5, "reason": "empty response"}
+        
         response_text = message.content[0].text
+        
+        if not response_text:
+            print("[Error] No text in Claude response")
+            return {"market": "NONE", "action": "HOLD", "confidence": 0.5, "reason": "no text"}
+        
+        print(f"[Claude] Raw response: {response_text}")
+        
         start_idx = response_text.find('{')
         end_idx = response_text.rfind('}') + 1
-        if start_idx != -1 and end_idx > start_idx:
-            json_str = response_text[start_idx:end_idx]
-            return json.loads(json_str)
+        
+        if start_idx == -1 or end_idx <= start_idx:
+            print(f"[Error] No JSON found in response: {response_text}")
+            return {"market": "NONE", "action": "HOLD", "confidence": 0.5, "reason": "no json"}
+        
+        json_str = response_text[start_idx:end_idx]
+        result = json.loads(json_str)
+        print(f"[Claude] Parsed decision: {result}")
+        return result
+        
+    except json.JSONDecodeError as e:
+        print(f"[Error] JSON parse error: {e}")
+        return {"market": "NONE", "action": "HOLD", "confidence": 0.5, "reason": "json error"}
     except Exception as e:
-        print(f"[Error] Failed to parse AI response: {e}")
-    
-    return {"market": "NONE", "action": "HOLD", "confidence": 0.5, "reason": "parse error"}
+        print(f"[Error] Failed to get AI decision: {e}")
+        return {"market": "NONE", "action": "HOLD", "confidence": 0.5, "reason": "api error"}
 
 def load_state():
     """Load current state from file"""
