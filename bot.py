@@ -56,6 +56,7 @@ def fetch_futures_data(symbol: str, days_back: int = 2190):
         df = data.to_df()
         df = df.sort_values('ts_event').reset_index(drop=True)
         print(f"[Databento] Retrieved {len(df)} bars for {symbol}")
+        print(f"[Databento] Columns: {df.columns.tolist()}")
         return df
     except Exception as e:
         print(f"[Error] Failed to fetch {symbol} data: {e}")
@@ -256,8 +257,12 @@ def main():
     nq_row = nq_df.iloc[current_day_index]
     es_row = es_df.iloc[current_day_index]
     
+    # Use the index (which is the date) instead of ts_event
+    nq_date = nq_df.index[current_day_index] if hasattr(nq_df.index, '__getitem__') else str(nq_row.name)
+    es_date = es_df.index[current_day_index] if hasattr(es_df.index, '__getitem__') else str(es_row.name)
+    
     nq_data = {
-        "date": pd.Timestamp(nq_row['ts_event']).strftime('%Y-%m-%d'),
+        "date": pd.Timestamp(nq_date).strftime('%Y-%m-%d') if nq_date else "unknown",
         "open": float(nq_row['open']),
         "high": float(nq_row['high']),
         "low": float(nq_row['low']),
@@ -266,7 +271,7 @@ def main():
     }
     
     es_data = {
-        "date": pd.Timestamp(es_row['ts_event']).strftime('%Y-%m-%d'),
+        "date": pd.Timestamp(es_date).strftime('%Y-%m-%d') if es_date else "unknown",
         "open": float(es_row['open']),
         "high": float(es_row['high']),
         "low": float(es_row['low']),
@@ -280,8 +285,9 @@ def main():
     nq_context = []
     for i in range(start_idx, current_day_index):
         hist_row = nq_df.iloc[i]
+        hist_date = nq_df.index[i] if hasattr(nq_df.index, '__getitem__') else str(hist_row.name)
         nq_context.append({
-            "date": pd.Timestamp(hist_row['ts_event']).strftime('%Y-%m-%d'),
+            "date": pd.Timestamp(hist_date).strftime('%Y-%m-%d') if hist_date else "unknown",
             "open": float(hist_row['open']),
             "high": float(hist_row['high']),
             "low": float(hist_row['low']),
@@ -292,8 +298,9 @@ def main():
     es_context = []
     for i in range(start_idx, current_day_index):
         hist_row = es_df.iloc[i]
+        hist_date = es_df.index[i] if hasattr(es_df.index, '__getitem__') else str(hist_row.name)
         es_context.append({
-            "date": pd.Timestamp(hist_row['ts_event']).strftime('%Y-%m-%d'),
+            "date": pd.Timestamp(hist_date).strftime('%Y-%m-%d') if hist_date else "unknown",
             "open": float(hist_row['open']),
             "high": float(hist_row['high']),
             "low": float(hist_row['low']),
