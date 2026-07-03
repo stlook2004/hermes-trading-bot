@@ -5,10 +5,30 @@ import os
 import sys
 from datetime import datetime, timedelta
 import pandas as pd
+import requests
 
 # Initialize clients
 databento_key = os.getenv("DATABENTO_API_KEY")
+discord_webhook = os.getenv("DISCORD_WEBHOOK_URL")
 client = anthropic.Anthropic()
+
+def post_to_discord(embed_data):
+    """Post results to Discord webhook"""
+    if not discord_webhook:
+        print("[Warning] DISCORD_WEBHOOK_URL not set, skipping Discord post")
+        return
+    
+    try:
+        payload = {
+            "embeds": [embed_data]
+        }
+        response = requests.post(discord_webhook, json=payload)
+        if response.status_code == 204:
+            print("[Discord] Results posted successfully")
+        else:
+            print(f"[Discord] Failed to post: {response.status_code}")
+    except Exception as e:
+        print(f"[Discord] Error posting: {e}")
 
 def fetch_historical_data(symbol: str, days_back: int = 2190):
     """Fetch 6 years of historical data from Databento"""
@@ -159,6 +179,65 @@ def run_daily_backtest(symbol: str, df):
         "daily_results": results[-20:]  # Last 20 days
     }
 
+def format_discord_embed(all_results):
+    """Format results as Discord embed"""
+    total_pnl_all = sum(r['total_pnl'] for r in all_results)
+    total_trades_all = sum(r['num_trades'] for r in all_results)
+    
+    # Build symbol summaries
+    symbol_summaries = []
+    for result in all_results:
+        symbol_summaries.append(
+            f"**{result['symbol']}**: P&L ${result['total_pnl']:.2f} | "
+            f"Trades: {result['num_trades']} | Win Rate: {result['win_rate']}%"
+        )
+    
+    # Build recent trades
+    all_trades = []
+    for result in all_results:
+        for daily in result['daily_results']:
+            all_trades.append({
+                "date": daily['date'],
+                "symbol": result['symbol'],
+                "action": daily['action'],
+                "price": daily['price'],
+                "result": daily['result']
+            })
+    
+    # Sort by date and get last 15
+    all_trades.sort(key=lambda x: x['date'], reverse=True)
+    recent_trades_str = "\n".join([
+        f"{t['date']} **{t['symbol']}** {t['action']:4s} @ ${t['price']:.2f}"
+        for t in all_trades[:15]
+    ])
+    
+    embed = {
+        "title": "🤖 Hermes Trading Bot - Daily Backtest Results",
+        "color": 0x00ff00 if total_pnl_all > 0 else 0xff0000,
+        "fields": [
+            {
+                "name": "📊 Summary",
+                "value": f"**Combined P&L**: ${total_pnl_all:.2f}\n**Total Trades**: {total_trades_all}\n**Symbols**: {len(all_results)}",
+                "inline": False
+            },
+            {
+                "name": "📈 Per Symbol",
+                "value": "\n".join(symbol_summaries),
+                "inline": False
+            },
+            {
+                "name": "📝 Recent Trades (Last 15)",
+                "value": recent_trades_str if recent_trades_str else "No trades yet",
+                "inline": False
+            }
+        ],
+        "footer": {
+            "text": f"Backtest completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}"
+        }
+    }
+    
+    return embed
+
 def main():
     print("[Hermes] Starting day-by-day backtest cycle...")
     
@@ -194,6 +273,11 @@ def main():
         print(f"  Combined P&L: ${total_pnl_all:.2f}")
         print(f"  Total Trades: {total_trades_all}")
         print(f"  Symbols Analyzed: {len(all_results)}")
+        
+        # Post to Discord
+        print("\n[Discord] Posting results...")
+        embed = format_discord_embed(all_results)
+        post_to_discord(embed)
     
     print(f"\n[Hermes] Backtest cycle complete.")
 
