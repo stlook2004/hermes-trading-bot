@@ -15,7 +15,6 @@ RULES:
 8. Stop = 2x ATR(14), Target = 3x ATR(14)
 """
 
-
 import os
 import json
 import logging
