@@ -40,11 +40,11 @@ def fetch_futures_data(symbol: str, days_back: int = 2190):
         
         print(f"[Databento] Fetching {symbol} from {start_date.date()} to {end_date.date()}")
         
-        # Get OHLCV data (daily bars)
-        # NQ = Nasdaq 100 Mini, ES = S&P 500 Mini
+        # Use GLBX.MDP3 for CME futures (NQ and ES)
+        # Symbol format: NQ.FUT or ES.FUT
         data = hist_client.timeseries.get_range(
-            dataset="XNAS.ITCH" if symbol == "NQ" else "XCME.ITCH",
-            symbols=symbol,
+            dataset="GLBX.MDP3",
+            symbols=f"{symbol}.FUT",
             stype_in="parent",
             start=start_date.isoformat(),
             end=end_date.isoformat(),
