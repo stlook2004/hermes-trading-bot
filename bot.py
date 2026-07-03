@@ -35,7 +35,8 @@ def fetch_futures_data(symbol: str, days_back: int = 2190):
     try:
         hist_client = db.Historical(databento_key)
         
-        end_date = datetime.now()
+        # Use yesterday's date as end (Databento only has data up to previous day close)
+        end_date = datetime.now() - timedelta(days=1)
         start_date = end_date - timedelta(days=days_back)
         
         print(f"[Databento] Fetching {symbol} from {start_date.date()} to {end_date.date()}")
