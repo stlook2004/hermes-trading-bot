@@ -83,7 +83,7 @@ Pick ONE trade: NQ or ES, BUY/SELL/HOLD. Respond ONLY as JSON:
 {{"market": "NQ"|"ES", "action": "BUY"|"SELL"|"HOLD", "confidence": 0.0-1.0, "reason": "one sentence"}}"""
 
     message = client.messages.create(
-        model="claude-3-5-sonnet-20241022",
+        model="claude-sonnet-5",
         max_tokens=150,
         messages=[{"role": "user", "content": prompt}]
     )
