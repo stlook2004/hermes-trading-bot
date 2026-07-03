@@ -27,6 +27,10 @@ def post_to_discord(embed_data):
     except Exception as e:
         print(f"[Discord] Error posting: {e}")
 
+def is_trading_day(date: datetime) -> bool:
+    """Check if date is a weekday (Mon-Fri)"""
+    return date.weekday() < 5
+
 def fetch_and_aggregate_5min_data(symbol: str, trade_date: datetime):
     """Fetch 1-minute data and aggregate to 5-minute bars"""
     try:
@@ -48,6 +52,10 @@ def fetch_and_aggregate_5min_data(symbol: str, trade_date: datetime):
         )
         
         df = data.to_df()
+        if len(df) == 0:
+            print(f"[Databento] No data for {symbol} on {trade_date.date()}")
+            return None
+        
         df = df.sort_values('ts_event').reset_index(drop=True)
         print(f"[Databento] Retrieved {len(df)} 1-min bars for {symbol}")
         
@@ -205,9 +213,9 @@ def load_state():
         except Exception as e:
             print(f"[Error] Failed to load state: {e}")
     
-    print("[State] Starting fresh from 2020-07-04")
+    print("[State] Starting fresh from 2020-07-06 (first trading day)")
     return {
-        "current_date": "2020-07-04",
+        "current_date": "2020-07-06",
         "portfolio": {"position": None, "market": None, "entry_price": 0, "entry_bar_idx": 0},
         "daily_pnl": [],
         "trades": []
@@ -253,6 +261,11 @@ def main():
     state = load_state()
     trade_date = datetime.strptime(state['current_date'], '%Y-%m-%d')
     
+    # Skip weekends
+    while not is_trading_day(trade_date):
+        print(f"[Hermes] Skipping {trade_date.strftime('%Y-%m-%d')} ({['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][trade_date.weekday()]})")
+        trade_date += timedelta(days=1)
+    
     print(f"[Hermes] Trading {trade_date.strftime('%Y-%m-%d')}...")
     
     # Fetch and aggregate 5-min data for today
@@ -260,7 +273,11 @@ def main():
     es_5min = fetch_and_aggregate_5min_data("ES", trade_date)
     
     if nq_5min is None or es_5min is None or len(nq_5min) == 0 or len(es_5min) == 0:
-        print("[Error] Failed to fetch 5-min data")
+        print("[Error] Failed to fetch 5-min data, skipping day")
+        # Move to next day
+        next_date = trade_date + timedelta(days=1)
+        state['current_date'] = next_date.strftime('%Y-%m-%d')
+        save_state(state)
         return
     
     # Convert to bar dicts
@@ -276,37 +293,44 @@ def main():
     
     print(f"[Hermes] NQ: {len(nq_bars)} 5-min bars, ES: {len(es_bars)} 5-min bars")
     
-    # Fetch prior 5 days for context
+    # Fetch prior 5 trading days for context
     nq_context = []
     es_context = []
     
-    for i in range(1, 6):
-        prior_date = trade_date - timedelta(days=i)
-        try:
-            prior_nq = fetch_and_aggregate_5min_data("NQ", prior_date)
-            prior_es = fetch_and_aggregate_5min_data("ES", prior_date)
-            
-            if prior_nq is not None and len(prior_nq) > 0:
-                nq_context.insert(0, {
-                    "date": prior_date.strftime('%Y-%m-%d'),
-                    "open": float(prior_nq.iloc[0]['open']),
-                    "high": float(prior_nq['high'].max()),
-                    "low": float(prior_nq['low'].min()),
-                    "close": float(prior_nq.iloc[-1]['close']),
-                    "volume": int(prior_nq['volume'].sum())
-                })
-            
-            if prior_es is not None and len(prior_es) > 0:
-                es_context.insert(0, {
-                    "date": prior_date.strftime('%Y-%m-%d'),
-                    "open": float(prior_es.iloc[0]['open']),
-                    "high": float(prior_es['high'].max()),
-                    "low": float(prior_es['low'].min()),
-                    "close": float(prior_es.iloc[-1]['close']),
-                    "volume": int(prior_es['volume'].sum())
-                })
-        except:
-            pass
+    context_date = trade_date - timedelta(days=1)
+    days_fetched = 0
+    
+    while days_fetched < 5 and context_date.year >= 2020:
+        if is_trading_day(context_date):
+            try:
+                prior_nq = fetch_and_aggregate_5min_data("NQ", context_date)
+                prior_es = fetch_and_aggregate_5min_data("ES", context_date)
+                
+                if prior_nq is not None and len(prior_nq) > 0:
+                    nq_context.insert(0, {
+                        "date": context_date.strftime('%Y-%m-%d'),
+                        "open": float(prior_nq.iloc[0]['open']),
+                        "high": float(prior_nq['high'].max()),
+                        "low": float(prior_nq['low'].min()),
+                        "close": float(prior_nq.iloc[-1]['close']),
+                        "volume": int(prior_nq['volume'].sum())
+                    })
+                
+                if prior_es is not None and len(prior_es) > 0:
+                    es_context.insert(0, {
+                        "date": context_date.strftime('%Y-%m-%d'),
+                        "open": float(prior_es.iloc[0]['open']),
+                        "high": float(prior_es['high'].max()),
+                        "low": float(prior_es['low'].min()),
+                        "close": float(prior_es.iloc[-1]['close']),
+                        "volume": int(prior_es['volume'].sum())
+                    })
+                
+                days_fetched += 1
+            except:
+                pass
+        
+        context_date -= timedelta(days=1)
     
     portfolio = state['portfolio']
     
