@@ -160,10 +160,10 @@ class TradingBot:
             for record in data:
                 bars.append({
                     "ts": record.ts_event,
-                    "open": record.open,
-                    "high": record.high,
-                    "low": record.low,
-                    "close": record.close,
+                    "open": record.open / 1e9,
+                    "high": record.high / 1e9,
+                    "low": record.low / 1e9,
+                    "close": record.close / 1e9,
                     "volume": record.volume,
                 })
             
