@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Hermes Trading Bot - 1-minute bar backtester with strict no-lookahead rules.
+Hermes Trading Bot - 1-minute bar backtester with 5-minute aggregation.
 Trades EMA/RSI strategy with ATR-based stops/targets.
 Reports to Discord with entry/exit times and comprehensive backtest stats.
 
 RULES:
 1. Pull 1-minute OHLCV bars from Databento with cost approval
-2. Store bars sorted by timestamp
-3. NO LOOKAHEAD: Process bars one at a time, at bar N only use bars 0..N
-4. Signals on bar CLOSE, fills at next bar OPEN
-5. 1 tick slippage per side + realistic commission
-6. Max 5 trades per day, 1 position at a time, force-close at session end
-7. EMA(9) cross EMA(21) + RSI(14) > 50 for LONG, inverse for SHORT
-8. Stop = 2x ATR(14), Target = 3x ATR(14)
+2. Aggregate 1-minute bars into 5-minute bars
+3. Store bars sorted by timestamp
+4. NO LOOKAHEAD: Process bars one at a time, at bar N only use bars 0..N
+5. Signals on bar CLOSE, fills at next bar OPEN
+6. 1 tick slippage per side + realistic commission
+7. Max 5 trades per day, 1 position at a time, force-close at session end
+8. EMA(9) cross EMA(21) + RSI(14) > 50 for LONG, inverse for SHORT
+9. Stop = 2x ATR(14), Target = 3x ATR(14)
 """
 
 import os
@@ -130,7 +131,7 @@ class TradingBot:
             cost = client.metadata.get_cost(
                 dataset=dataset,
                 symbols=[symbol],
-                schema="ohlcv-5m",
+                schema="ohlcv-1m",
                 start=start_date,
                 end=end_date,
             )
@@ -151,7 +152,7 @@ class TradingBot:
             data = client.timeseries.get_range(
                 dataset=dataset,
                 symbols=[symbol],
-                schema="ohlcv-5m",
+                schema="ohlcv-1m",
                 start=start_date,
                 end=end_date,
             )
@@ -174,8 +175,51 @@ class TradingBot:
             logger.error(f"Error fetching bars: {e}")
             return []
 
+    def aggregate_to_5min(self, bars: List[Dict]) -> List[Dict]:
+        """Aggregate 1-minute bars into 5-minute bars."""
+        if not bars:
+            return []
+        
+        aggregated = []
+        current_5min = None
+        
+        for bar in bars:
+            # Get the timestamp and round down to nearest 5-minute boundary
+            ts = bar["ts"]
+            dt = datetime.fromtimestamp(ts / 1e9)
+            
+            # Round down to nearest 5-minute boundary
+            minute = (dt.minute // 5) * 5
+            rounded_dt = dt.replace(minute=minute, second=0, microsecond=0)
+            rounded_ts = int(rounded_dt.timestamp() * 1e9)
+            
+            # Start new 5-minute bar if needed
+            if current_5min is None or current_5min["ts"] != rounded_ts:
+                if current_5min is not None:
+                    aggregated.append(current_5min)
+                
+                current_5min = {
+                    "ts": rounded_ts,
+                    "open": bar["open"],
+                    "high": bar["high"],
+                    "low": bar["low"],
+                    "close": bar["close"],
+                    "volume": bar["volume"],
+                }
+            else:
+                # Update existing 5-minute bar
+                current_5min["high"] = max(current_5min["high"], bar["high"])
+                current_5min["low"] = min(current_5min["low"], bar["low"])
+                current_5min["close"] = bar["close"]
+                current_5min["volume"] += bar["volume"]
+        
+        # Don't forget the last bar
+        if current_5min is not None:
+            aggregated.append(current_5min)
+        
+        logger.info(f"Aggregated {len(bars)} 1-minute bars into {len(aggregated)} 5-minute bars")
+        return aggregated
 
-   
     def compute_ema(self, closes: List[float], period: int) -> Optional[float]:
         if len(closes) < period:
             return None
@@ -627,6 +671,8 @@ class TradingBot:
         if not bars:
             logger.error("No bars fetched, exiting")
             return
+        
+        bars = self.aggregate_to_5min(bars)
         
         self.process_bars(bars, symbol)
         
