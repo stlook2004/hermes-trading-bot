@@ -1,4 +1,5 @@
-anthropic
-databento
-pandas
-requests
+# Updated 2026-07-22 - force rebuild
+anthropic>=0.7.0
+databento>=0.80
+pandas>=2.0
+requests>=2.28
