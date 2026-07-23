@@ -99,12 +99,12 @@ def get_ai_entry_decision(nq_bars: list, es_bars: list, nq_context: list, es_con
     
     nq_context_str = "\n".join([
         f"{d['date']}: O={d['open']:.2f} H={d['high']:.2f} L={d['low']:.2f} C={d['close']:.2f}"
-        for d in nq_context[-5:]  # Last 5 days
+        for d in nq_context[-5:]
     ]) if nq_context else "No data"
     
     es_context_str = "\n".join([
         f"{d['date']}: O={d['open']:.2f} H={d['high']:.2f} L={d['low']:.2f} C={d['close']:.2f}"
-        for d in es_context[-5:]  # Last 5 days
+        for d in es_context[-5:]
     ]) if es_context else "No data"
     
     prompt = f"""You are a futures day trader. Your current strategy: {strategy}
@@ -137,15 +137,11 @@ Respond ONLY as JSON:
             messages=[{"role": "user", "content": prompt}]
         )
         
-        print(f"[Claude] Response received. Content length: {len(message.content)}")
-        
         if not message.content or len(message.content) == 0:
             print("[Error] Empty content array from Claude")
             return None
         
         response_text = message.content[0].text
-        
-        print(f"[Claude] Response text: {response_text}")
         
         if not response_text:
             print("[Error] No text in Claude response")
@@ -160,7 +156,6 @@ Respond ONLY as JSON:
         
         json_str = response_text[start_idx:end_idx]
         result = json.loads(json_str)
-        print(f"[Claude] Parsed decision: {result}")
         return result
         
     except Exception as e:
@@ -174,7 +169,7 @@ def get_ai_exit_decision(entry_price: float, market: str, bars_since_entry: list
     
     bars_str = "\n".join([
         f"{i*5}min: O={b['open']:.2f} H={b['high']:.2f} L={b['low']:.2f} C={b['close']:.2f}"
-        for i, b in enumerate(bars_since_entry[-12:])  # Last hour
+        for i, b in enumerate(bars_since_entry[-12:])
     ])
     
     prompt = f"""You entered a {market} trade at {entry_price:.2f}. Current price: {current_bar['close']:.2f}. P&L: {current_bar['close'] - entry_price:.2f}
@@ -218,8 +213,8 @@ def get_ai_strategy_update(recent_trades: list, weekly_pnl: float, win_rate: flo
     """Use Claude to evaluate strategy and suggest improvements"""
     
     trades_str = "\n".join([
-        f"{t['date']}: {t['action']} {t['market']} @ {t['entry_price']:.2f} → {t['exit_price']:.2f} | P&L: ${t['pnl']:.2f}"
-        for t in recent_trades[-7:]
+        f"#{i+1}: {t['action']} {t['market']} @ {t['entry_price']:.2f} → {t['exit_price']:.2f} | P&L: ${t['pnl']:.2f}"
+        for i, t in enumerate(recent_trades[-7:])
     ])
     
     prompt = f"""You are a futures day trading strategy consultant. Review the last 7 trades and evaluate the strategy.
@@ -294,7 +289,7 @@ def save_state(state):
     try:
         with open(state_file, 'w') as f:
             json.dump(state, f)
-        print(f"[State] Saved: trades={len(state.get('trades', []))}")
+        print(f"[State] Saved: trades={len(state.get('trades', []))}, date={state.get('current_date')}")
     except Exception as e:
         print(f"[Error] Failed to save state: {e}")
 
@@ -343,7 +338,7 @@ def format_strategy_overview_embed(state: dict, recent_trades: list, strategy_up
         strategy_change = f"⚪ **NO CHANGE** - Strategy working well\n{strategy_update.get('rationale', 'N/A')}"
     
     embed = {
-        "title": f"📈 Strategy Overview - Every 7 Trades",
+        "title": f"📈 7-Trade Strategy Review & Recap",
         "color": color,
         "fields": [
             {"name": "Last 7 Trades", "value": trades_list, "inline": False},
@@ -367,7 +362,7 @@ def main():
         print(f"[Hermes] Skipping {trade_date.strftime('%Y-%m-%d')} ({['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][trade_date.weekday()]})")
         trade_date += timedelta(days=1)
     
-    print(f"[Hermes] Trading {trade_date.strftime('%Y-%m-%d')}...")
+    print(f"[Hermes] Trading {trade_date.strftime('%Y-%m-%d')}... (Total trades so far: {len(state['trades'])})")
     
     # Fetch and aggregate 5-min data for today
     nq_5min = fetch_and_aggregate_5min_data("NQ", trade_date)
@@ -444,7 +439,7 @@ def main():
             market = entry_decision.get('market', 'NQ')
             action = entry_decision.get('action')
             bars = nq_bars if market == 'NQ' else es_bars
-            entry_price = bars[23]['close']  # Entry at end of 2nd hour
+            entry_price = bars[23]['close']
             
             portfolio['position'] = 'LONG' if action == 'BUY' else 'SHORT'
             portfolio['market'] = market
@@ -453,7 +448,7 @@ def main():
             
             print(f"[Trade] ENTRY: {action} {market} @ {entry_price:.2f}")
         else:
-            print(f"[Hermes] No entry decision made. Decision: {entry_decision}")
+            print(f"[Hermes] No entry decision made")
     
     # EXIT PHASE: After entry, look for exit signal
     if portfolio['position'] is not None:
@@ -461,7 +456,6 @@ def main():
         bars = nq_bars if market == 'NQ' else es_bars
         entry_bar_idx = portfolio['entry_bar_idx']
         
-        # Check bars from entry onwards
         for bar_idx in range(entry_bar_idx, len(bars)):
             current_bar = bars[bar_idx]
             bars_since_entry = bars[entry_bar_idx:bar_idx+1]
@@ -481,7 +475,6 @@ def main():
                 
                 print(f"[Trade] EXIT: {market} @ {exit_price:.2f} | P&L: ${pnl:.2f}")
                 
-                # Post individual trade to Discord
                 embed = format_trade_embed(
                     trade_date.strftime('%Y-%m-%d'),
                     portfolio['entry_price'],
@@ -502,18 +495,16 @@ def main():
                     "pnl": pnl
                 })
                 
-                # Every 7 trades, post strategy overview
+                # Check if we hit 7 trades
                 if len(state['trades']) % 7 == 0:
-                    print(f"[Hermes] 7 trades reached! Posting strategy overview...")
+                    print(f"[Hermes] 7 trades milestone! Posting strategy overview...")
                     recent_trades = state['trades'][-7:]
                     weekly_pnl = sum([t['pnl'] for t in recent_trades])
                     winning = len([t for t in recent_trades if t['pnl'] > 0])
-                    win_rate = (winning / 7 * 100) if recent_trades else 0
+                    win_rate = (winning / 7 * 100)
                     
-                    # Get strategy evaluation from Claude
                     strategy_update = get_ai_strategy_update(state['trades'], weekly_pnl, win_rate)
                     
-                    # Update strategy if needed
                     if strategy_update.get('should_adjust') and strategy_update.get('new_strategy'):
                         old_strategy = state.get('strategy', '')
                         state['strategy'] = strategy_update['new_strategy']
@@ -525,9 +516,19 @@ def main():
                         })
                         print(f"[Strategy] Updated: {state['strategy']}")
                     
-                    # Post overview to Discord
                     overview_embed = format_strategy_overview_embed(state, recent_trades, strategy_update)
                     post_to_discord(overview_embed)
+                    print(f"[Discord] Posted 7-trade recap!")
+                    
+                    # IMPORTANT: Save state BEFORE moving to next day
+                    save_state(state)
+                    
+                    # Move to next day after recap
+                    next_date = trade_date + timedelta(days=1)
+                    state['current_date'] = next_date.strftime('%Y-%m-%d')
+                    save_state(state)
+                    print(f"[Hermes] Advancing to next day: {next_date.strftime('%Y-%m-%d')}")
+                    return
                 
                 portfolio['position'] = None
                 portfolio['market'] = None
@@ -562,18 +563,16 @@ def main():
                 "pnl": pnl
             })
             
-            # Every 7 trades, post strategy overview
+            # Check if we hit 7 trades
             if len(state['trades']) % 7 == 0:
-                print(f"[Hermes] 7 trades reached! Posting strategy overview...")
+                print(f"[Hermes] 7 trades milestone (EOD exit)! Posting strategy overview...")
                 recent_trades = state['trades'][-7:]
                 weekly_pnl = sum([t['pnl'] for t in recent_trades])
                 winning = len([t for t in recent_trades if t['pnl'] > 0])
-                win_rate = (winning / 7 * 100) if recent_trades else 0
+                win_rate = (winning / 7 * 100)
                 
-                # Get strategy evaluation from Claude
                 strategy_update = get_ai_strategy_update(state['trades'], weekly_pnl, win_rate)
                 
-                # Update strategy if needed
                 if strategy_update.get('should_adjust') and strategy_update.get('new_strategy'):
                     old_strategy = state.get('strategy', '')
                     state['strategy'] = strategy_update['new_strategy']
@@ -585,14 +584,24 @@ def main():
                     })
                     print(f"[Strategy] Updated: {state['strategy']}")
                 
-                # Post overview to Discord
                 overview_embed = format_strategy_overview_embed(state, recent_trades, strategy_update)
                 post_to_discord(overview_embed)
+                print(f"[Discord] Posted 7-trade recap!")
+                
+                # IMPORTANT: Save state BEFORE moving to next day
+                save_state(state)
+                
+                # Move to next day after recap
+                next_date = trade_date + timedelta(days=1)
+                state['current_date'] = next_date.strftime('%Y-%m-%d')
+                save_state(state)
+                print(f"[Hermes] Advancing to next day: {next_date.strftime('%Y-%m-%d')}")
+                return
             
             portfolio['position'] = None
             portfolio['market'] = None
     
-    # Move to next day
+    # Move to next day (if we didn't already)
     next_date = trade_date + timedelta(days=1)
     state['current_date'] = next_date.strftime('%Y-%m-%d')
     save_state(state)
