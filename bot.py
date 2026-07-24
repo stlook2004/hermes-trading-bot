@@ -21,7 +21,7 @@ def post_to_discord(embed_data):
         payload = {"embeds": [embed_data]}
         response = requests.post(discord_webhook, json=payload)
         if response.status_code == 204:
-            print("[Discord] Trade posted successfully")
+            print("[Discord] Posted successfully")
         else:
             print(f"[Discord] Failed to post: {response.status_code}")
     except Exception as e:
@@ -36,7 +36,6 @@ def fetch_and_aggregate_5min_data(symbol: str, trade_date: datetime):
     try:
         hist_client = db.Historical(databento_key)
         
-        # Fetch 1-min bars for the trading day
         start = trade_date.replace(hour=0, minute=0, second=0)
         end = trade_date.replace(hour=23, minute=59, second=59)
         
@@ -58,11 +57,9 @@ def fetch_and_aggregate_5min_data(symbol: str, trade_date: datetime):
         
         print(f"[Databento] Retrieved {len(df)} 1-min bars for {symbol}")
         
-        # The index is the timestamp, use it for aggregation
         df.index.name = 'time'
         df = df.reset_index()
         
-        # Aggregate to 5-minute bars using the time column
         df['time_5m'] = df['time'].dt.floor('5min')
         bars_5m = df.groupby('time_5m').agg({
             'open': 'first',
@@ -76,14 +73,11 @@ def fetch_and_aggregate_5min_data(symbol: str, trade_date: datetime):
         return bars_5m
     except Exception as e:
         print(f"[Error] Failed to fetch {symbol} data: {e}")
-        import traceback
-        traceback.print_exc()
         return None
 
 def get_ai_entry_decision(nq_bars: list, es_bars: list, nq_context: list, es_context: list, strategy: str) -> dict:
     """Use Claude to analyze early bars and decide on entry"""
     
-    # Format early bars (first 2 hours = 24 bars of 5-min)
     nq_early = nq_bars[:24] if len(nq_bars) >= 24 else nq_bars
     es_early = es_bars[:24] if len(es_bars) >= 24 else es_bars
     
@@ -124,44 +118,35 @@ PRIOR 5 DAYS CONTEXT:
 NQ: {nq_context_str}
 ES: {es_context_str}
 
-Pick ONE market (NQ or ES) and BUY or SELL based on early momentum. You will close this trade later in the day.
+Pick ONE market (NQ or ES) and BUY or SELL based on early momentum.
 
 Respond ONLY as JSON:
 {{"market": "NQ"|"ES", "action": "BUY"|"SELL", "entry_reason": "one sentence", "confidence": 0.0-1.0}}"""
 
     try:
-        print(f"[Claude] Sending prompt ({len(prompt)} chars)...")
         message = client.messages.create(
             model="claude-sonnet-5",
             max_tokens=150,
             messages=[{"role": "user", "content": prompt}]
         )
         
-        if not message.content or len(message.content) == 0:
-            print("[Error] Empty content array from Claude")
+        if not message.content:
             return None
         
         response_text = message.content[0].text
-        
         if not response_text:
-            print("[Error] No text in Claude response")
             return None
         
         start_idx = response_text.find('{')
         end_idx = response_text.rfind('}') + 1
         
         if start_idx == -1 or end_idx <= start_idx:
-            print(f"[Error] No JSON found in response: {response_text}")
             return None
         
-        json_str = response_text[start_idx:end_idx]
-        result = json.loads(json_str)
-        return result
+        return json.loads(response_text[start_idx:end_idx])
         
     except Exception as e:
-        print(f"[Error] Failed to get entry decision: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"[Error] Entry decision failed: {e}")
         return None
 
 def get_ai_exit_decision(entry_price: float, market: str, bars_since_entry: list, current_bar: dict) -> dict:
@@ -179,7 +164,7 @@ Recent bars (last hour):
 
 Current bar: O={current_bar['open']:.2f} H={current_bar['high']:.2f} L={current_bar['low']:.2f} C={current_bar['close']:.2f}
 
-Should you EXIT now? Consider: profit taking, stop loss, trend reversal.
+Should you EXIT now?
 
 Respond ONLY as JSON:
 {{"should_exit": true|false, "reason": "one sentence"}}"""
@@ -199,42 +184,35 @@ Respond ONLY as JSON:
         start_idx = response_text.find('{')
         end_idx = response_text.rfind('}') + 1
         
-        if start_idx == -1 or end_idx <= start_idx:
+        if start_idx == -1:
             return {"should_exit": False, "reason": "no json"}
         
-        json_str = response_text[start_idx:end_idx]
-        return json.loads(json_str)
+        return json.loads(response_text[start_idx:end_idx])
         
     except Exception as e:
-        print(f"[Error] Failed to get exit decision: {e}")
         return {"should_exit": False, "reason": "error"}
 
 def get_ai_strategy_update(recent_trades: list, weekly_pnl: float, win_rate: float) -> dict:
-    """Use Claude to evaluate strategy and suggest improvements"""
+    """Use Claude to evaluate strategy"""
     
     trades_str = "\n".join([
         f"#{i+1}: {t['action']} {t['market']} @ {t['entry_price']:.2f} → {t['exit_price']:.2f} | P&L: ${t['pnl']:.2f}"
         for i, t in enumerate(recent_trades[-7:])
     ])
     
-    prompt = f"""You are a futures day trading strategy consultant. Review the last 7 trades and evaluate the strategy.
+    prompt = f"""Review these 7 trades and evaluate the strategy.
 
-LAST 7 TRADES:
+TRADES:
 {trades_str}
 
-WEEKLY STATS:
+STATS:
 - Total P&L: ${weekly_pnl:.2f}
 - Win Rate: {win_rate:.1f}%
-- Trades: 7
 
-Based on this performance, should you adjust your trading strategy? Consider:
-1. Market selection (NQ vs ES preference)
-2. Entry timing (early in the day vs later)
-3. Exit strategy (profit targets, stop losses)
-4. Risk management
+Should you adjust the strategy?
 
 Respond ONLY as JSON:
-{{"should_adjust": true|false, "new_strategy": "concise description of updated strategy or null if no change", "rationale": "one sentence explanation"}}"""
+{{"should_adjust": true|false, "new_strategy": "description or null", "rationale": "one sentence"}}"""
 
     try:
         message = client.messages.create(
@@ -251,14 +229,12 @@ Respond ONLY as JSON:
         start_idx = response_text.find('{')
         end_idx = response_text.rfind('}') + 1
         
-        if start_idx == -1 or end_idx <= start_idx:
+        if start_idx == -1:
             return {"should_adjust": False, "new_strategy": None, "rationale": "no json"}
         
-        json_str = response_text[start_idx:end_idx]
-        return json.loads(json_str)
+        return json.loads(response_text[start_idx:end_idx])
         
     except Exception as e:
-        print(f"[Error] Failed to get strategy update: {e}")
         return {"should_adjust": False, "new_strategy": None, "rationale": "error"}
 
 def load_state():
@@ -277,7 +253,6 @@ def load_state():
     return {
         "current_date": "2020-07-06",
         "portfolio": {"position": None, "market": None, "entry_price": 0, "entry_bar_idx": 0},
-        "daily_pnl": [],
         "trades": [],
         "strategy": "Early momentum trading: BUY/SELL during first 2 hours based on 5-min bar trends. Exit on reversal or profit target.",
         "strategy_history": []
@@ -293,90 +268,67 @@ def save_state(state):
     except Exception as e:
         print(f"[Error] Failed to save state: {e}")
 
-def format_trade_embed(trade_date: str, entry_price: float, exit_price: float, market: str, action: str, pnl: float, state: dict):
+def format_trade_embed(trade_date: str, entry_price: float, exit_price: float, market: str, action: str, pnl: float, trade_num: int, total_pnl: float):
     """Format single trade as Discord embed"""
     
-    total_pnl = sum(state['daily_pnl'])
-    num_trades = len([p for p in state['daily_pnl'] if p != 0])
-    winning_trades = len([p for p in state['daily_pnl'] if p > 0])
-    win_rate = (winning_trades / num_trades * 100) if num_trades > 0 else 0
-    
     color = 0x00ff00 if pnl > 0 else 0xff0000 if pnl < 0 else 0x999999
-    
     trade_desc = f"**{action} {market}** @ {entry_price:.2f} → {exit_price:.2f}\nP&L: ${pnl:.2f}"
     
     embed = {
-        "title": f"📊 Trade #{len(state['trades'])} - {trade_date}",
+        "title": f"📊 Trade #{trade_num} - {trade_date}",
         "color": color,
         "fields": [
             {"name": "Trade", "value": trade_desc, "inline": False},
-            {"name": "Account Stats", "value": f"Total P&L: ${total_pnl:.2f}\nTrades: {num_trades}\nWin Rate: {win_rate:.1f}%", "inline": False}
-        ],
-        "footer": {"text": f"Cumulative P&L: ${total_pnl:.2f}"}
+            {"name": "Info", "value": f"Cumulative P&L: ${total_pnl:.2f}", "inline": False}
+        ]
     }
     
     return embed
 
-def format_strategy_overview_embed(state: dict, recent_trades: list, strategy_update: dict):
-    """Format 7-trade strategy overview as Discord embed"""
+def format_weekly_recap_embed(week_start: str, week_end: str, recent_trades: list, weekly_pnl: float, strategy_update: dict, strategy: str):
+    """Format 7-trade weekly recap as Discord embed"""
     
-    weekly_pnl = sum([t['pnl'] for t in recent_trades])
     winning = len([t for t in recent_trades if t['pnl'] > 0])
     win_rate = (winning / len(recent_trades) * 100) if recent_trades else 0
     
     color = 0x00ff00 if weekly_pnl > 0 else 0xff0000 if weekly_pnl < 0 else 0x999999
     
     trades_list = "\n".join([
-        f"#{state['trades'].index(t) + 1}: {t['action']} {t['market']} | P&L: ${t['pnl']:.2f}"
-        for t in recent_trades
+        f"#{i+1}: {t['action']} {t['market']} | P&L: ${t['pnl']:.2f}"
+        for i, t in enumerate(recent_trades)
     ])
     
     strategy_change = ""
-    if strategy_update.get('should_adjust'):
-        strategy_change = f"✅ **STRATEGY UPDATED**\n{strategy_update.get('new_strategy', 'N/A')}\n\n**Rationale**: {strategy_update.get('rationale', 'N/A')}"
+    if strategy_update.get('should_adjust') and strategy_update.get('new_strategy'):
+        strategy_change = f"✅ **STRATEGY UPDATED**\n{strategy_update.get('new_strategy', 'N/A')}\n\n**Reason**: {strategy_update.get('rationale', 'N/A')}"
     else:
-        strategy_change = f"⚪ **NO CHANGE** - Strategy working well\n{strategy_update.get('rationale', 'N/A')}"
+        strategy_change = f"⚪ **NO CHANGE**\n{strategy_update.get('rationale', 'Good performance, keeping strategy')}"
     
     embed = {
-        "title": f"📈 7-Trade Strategy Review & Recap",
+        "title": f"📈 Weekly Trading Recap",
         "color": color,
         "fields": [
-            {"name": "Last 7 Trades", "value": trades_list, "inline": False},
-            {"name": "Weekly Performance", "value": f"**Total P&L**: ${weekly_pnl:.2f}\n**Win Rate**: {win_rate:.1f}%\n**Wins**: {winning}/7", "inline": False},
-            {"name": "Strategy Review", "value": strategy_change, "inline": False},
-            {"name": "Current Strategy", "value": state.get('strategy', 'N/A'), "inline": False}
-        ],
-        "footer": {"text": f"Total Cumulative P&L: ${sum(state['daily_pnl']):.2f}"}
+            {"name": "Period", "value": f"{week_start} → {week_end}", "inline": False},
+            {"name": "7 Trades", "value": trades_list, "inline": False},
+            {"name": "Weekly Stats", "value": f"**Total P&L**: ${weekly_pnl:.2f}\n**Win Rate**: {win_rate:.1f}%\n**Wins**: {winning}/7", "inline": False},
+            {"name": "Strategy Adjustment", "value": strategy_change, "inline": False},
+            {"name": "Active Strategy", "value": strategy, "inline": False}
+        ]
     }
     
     return embed
 
-def main():
-    print("[Hermes] Starting intraday trading test...")
+def trade_on_day(trade_date: datetime, state: dict):
+    """Execute one day of trading"""
     
-    state = load_state()
-    trade_date = datetime.strptime(state['current_date'], '%Y-%m-%d')
-    
-    # Skip weekends
-    while not is_trading_day(trade_date):
-        print(f"[Hermes] Skipping {trade_date.strftime('%Y-%m-%d')} ({['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][trade_date.weekday()]})")
-        trade_date += timedelta(days=1)
-    
-    print(f"[Hermes] Trading {trade_date.strftime('%Y-%m-%d')}... (Total trades so far: {len(state['trades'])})")
-    
-    # Fetch and aggregate 5-min data for today
+    # Fetch data
     nq_5min = fetch_and_aggregate_5min_data("NQ", trade_date)
     es_5min = fetch_and_aggregate_5min_data("ES", trade_date)
     
     if nq_5min is None or es_5min is None or len(nq_5min) == 0 or len(es_5min) == 0:
-        print("[Error] Failed to fetch 5-min data, skipping day")
-        # Move to next day
-        next_date = trade_date + timedelta(days=1)
-        state['current_date'] = next_date.strftime('%Y-%m-%d')
-        save_state(state)
-        return
+        print("[Error] Failed to fetch 5-min data for this day")
+        return False
     
-    # Convert to bar dicts
     nq_bars = [
         {"open": float(row['open']), "high": float(row['high']), "low": float(row['low']), "close": float(row['close']), "volume": int(row['volume'])}
         for _, row in nq_5min.iterrows()
@@ -389,7 +341,7 @@ def main():
     
     print(f"[Hermes] NQ: {len(nq_bars)} 5-min bars, ES: {len(es_bars)} 5-min bars")
     
-    # Fetch prior 5 trading days for context
+    # Get context
     nq_context = []
     es_context = []
     
@@ -430,9 +382,8 @@ def main():
     
     portfolio = state['portfolio']
     
-    # ENTRY PHASE: First 2 hours
+    # ENTRY PHASE
     if portfolio['position'] is None and len(nq_bars) >= 24:
-        print("[Hermes] Calling AI for entry decision...")
         entry_decision = get_ai_entry_decision(nq_bars, es_bars, nq_context, es_context, state.get('strategy', ''))
         
         if entry_decision and entry_decision.get('action') in ['BUY', 'SELL']:
@@ -447,14 +398,14 @@ def main():
             portfolio['entry_bar_idx'] = 24
             
             print(f"[Trade] ENTRY: {action} {market} @ {entry_price:.2f}")
-        else:
-            print(f"[Hermes] No entry decision made")
     
-    # EXIT PHASE: After entry, look for exit signal
+    # EXIT PHASE
     if portfolio['position'] is not None:
         market = portfolio['market']
         bars = nq_bars if market == 'NQ' else es_bars
         entry_bar_idx = portfolio['entry_bar_idx']
+        
+        exit_found = False
         
         for bar_idx in range(entry_bar_idx, len(bars)):
             current_bar = bars[bar_idx]
@@ -471,20 +422,7 @@ def main():
                 exit_price = current_bar['close']
                 pnl = (exit_price - portfolio['entry_price']) if portfolio['position'] == 'LONG' else (portfolio['entry_price'] - exit_price)
                 
-                state['daily_pnl'].append(pnl)
-                
                 print(f"[Trade] EXIT: {market} @ {exit_price:.2f} | P&L: ${pnl:.2f}")
-                
-                embed = format_trade_embed(
-                    trade_date.strftime('%Y-%m-%d'),
-                    portfolio['entry_price'],
-                    exit_price,
-                    market,
-                    'BUY' if portfolio['position'] == 'LONG' else 'SELL',
-                    pnl,
-                    state
-                )
-                post_to_discord(embed)
                 
                 state['trades'].append({
                     "date": trade_date.strftime('%Y-%m-%d'),
@@ -495,64 +433,30 @@ def main():
                     "pnl": pnl
                 })
                 
-                # Check if we hit 7 trades
-                if len(state['trades']) % 7 == 0:
-                    print(f"[Hermes] 7 trades milestone! Posting strategy overview...")
-                    recent_trades = state['trades'][-7:]
-                    weekly_pnl = sum([t['pnl'] for t in recent_trades])
-                    winning = len([t for t in recent_trades if t['pnl'] > 0])
-                    win_rate = (winning / 7 * 100)
-                    
-                    strategy_update = get_ai_strategy_update(state['trades'], weekly_pnl, win_rate)
-                    
-                    if strategy_update.get('should_adjust') and strategy_update.get('new_strategy'):
-                        old_strategy = state.get('strategy', '')
-                        state['strategy'] = strategy_update['new_strategy']
-                        state['strategy_history'].append({
-                            "timestamp": datetime.now().isoformat(),
-                            "old_strategy": old_strategy,
-                            "new_strategy": state['strategy'],
-                            "reason": strategy_update.get('rationale', '')
-                        })
-                        print(f"[Strategy] Updated: {state['strategy']}")
-                    
-                    overview_embed = format_strategy_overview_embed(state, recent_trades, strategy_update)
-                    post_to_discord(overview_embed)
-                    print(f"[Discord] Posted 7-trade recap!")
-                    
-                    # IMPORTANT: Save state BEFORE moving to next day
-                    save_state(state)
-                    
-                    # Move to next day after recap
-                    next_date = trade_date + timedelta(days=1)
-                    state['current_date'] = next_date.strftime('%Y-%m-%d')
-                    save_state(state)
-                    print(f"[Hermes] Advancing to next day: {next_date.strftime('%Y-%m-%d')}")
-                    return
+                total_pnl = sum([t['pnl'] for t in state['trades']])
+                embed = format_trade_embed(
+                    trade_date.strftime('%Y-%m-%d'),
+                    portfolio['entry_price'],
+                    exit_price,
+                    market,
+                    'BUY' if portfolio['position'] == 'LONG' else 'SELL',
+                    pnl,
+                    len(state['trades']),
+                    total_pnl
+                )
+                post_to_discord(embed)
                 
                 portfolio['position'] = None
                 portfolio['market'] = None
+                exit_found = True
                 break
         
-        # If no exit signal by end of day, force exit at close
+        # Force exit at EOD if needed
         if portfolio['position'] is not None:
             exit_price = bars[-1]['close']
             pnl = (exit_price - portfolio['entry_price']) if portfolio['position'] == 'LONG' else (portfolio['entry_price'] - exit_price)
             
-            state['daily_pnl'].append(pnl)
-            
             print(f"[Trade] FORCE EXIT (EOD): {market} @ {exit_price:.2f} | P&L: ${pnl:.2f}")
-            
-            embed = format_trade_embed(
-                trade_date.strftime('%Y-%m-%d'),
-                portfolio['entry_price'],
-                exit_price,
-                market,
-                'BUY' if portfolio['position'] == 'LONG' else 'SELL',
-                pnl,
-                state
-            )
-            post_to_discord(embed)
             
             state['trades'].append({
                 "date": trade_date.strftime('%Y-%m-%d'),
@@ -563,50 +467,94 @@ def main():
                 "pnl": pnl
             })
             
-            # Check if we hit 7 trades
-            if len(state['trades']) % 7 == 0:
-                print(f"[Hermes] 7 trades milestone (EOD exit)! Posting strategy overview...")
-                recent_trades = state['trades'][-7:]
-                weekly_pnl = sum([t['pnl'] for t in recent_trades])
-                winning = len([t for t in recent_trades if t['pnl'] > 0])
-                win_rate = (winning / 7 * 100)
-                
-                strategy_update = get_ai_strategy_update(state['trades'], weekly_pnl, win_rate)
-                
-                if strategy_update.get('should_adjust') and strategy_update.get('new_strategy'):
-                    old_strategy = state.get('strategy', '')
-                    state['strategy'] = strategy_update['new_strategy']
-                    state['strategy_history'].append({
-                        "timestamp": datetime.now().isoformat(),
-                        "old_strategy": old_strategy,
-                        "new_strategy": state['strategy'],
-                        "reason": strategy_update.get('rationale', '')
-                    })
-                    print(f"[Strategy] Updated: {state['strategy']}")
-                
-                overview_embed = format_strategy_overview_embed(state, recent_trades, strategy_update)
-                post_to_discord(overview_embed)
-                print(f"[Discord] Posted 7-trade recap!")
-                
-                # IMPORTANT: Save state BEFORE moving to next day
-                save_state(state)
-                
-                # Move to next day after recap
-                next_date = trade_date + timedelta(days=1)
-                state['current_date'] = next_date.strftime('%Y-%m-%d')
-                save_state(state)
-                print(f"[Hermes] Advancing to next day: {next_date.strftime('%Y-%m-%d')}")
-                return
+            total_pnl = sum([t['pnl'] for t in state['trades']])
+            embed = format_trade_embed(
+                trade_date.strftime('%Y-%m-%d'),
+                portfolio['entry_price'],
+                exit_price,
+                market,
+                'BUY' if portfolio['position'] == 'LONG' else 'SELL',
+                pnl,
+                len(state['trades']),
+                total_pnl
+            )
+            post_to_discord(embed)
             
             portfolio['position'] = None
             portfolio['market'] = None
     
-    # Move to next day (if we didn't already)
-    next_date = trade_date + timedelta(days=1)
-    state['current_date'] = next_date.strftime('%Y-%m-%d')
+    return True
+
+def main():
+    print("[Hermes] Starting trading week cycle...")
+    
+    state = load_state()
+    start_date = datetime.strptime(state['current_date'], '%Y-%m-%d')
+    
+    # Skip weekends
+    while not is_trading_day(start_date):
+        print(f"[Hermes] Skipping {start_date.strftime('%Y-%m-%d')} ({['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][start_date.weekday()]})")
+        start_date += timedelta(days=1)
+    
+    print(f"[Hermes] Starting trading week from {start_date.strftime('%Y-%m-%d')}... (Total trades so far: {len(state['trades'])})")
+    
+    # Trade 7 days (Monday-Friday + possible start/end days)
+    trades_this_week = 0
+    current_date = start_date
+    week_start_date = start_date
+    
+    while trades_this_week < 7:
+        # Skip weekends
+        while not is_trading_day(current_date):
+            current_date += timedelta(days=1)
+        
+        print(f"\n[Hermes] Trading {current_date.strftime('%Y-%m-%d')}...")
+        
+        if trade_on_day(current_date, state):
+            trades_this_week += 1
+            save_state(state)
+        
+        current_date += timedelta(days=1)
+    
+    # After 7 trades, post weekly recap
+    print(f"\n[Hermes] 7 trades complete! Posting weekly recap...")
+    recent_trades = state['trades'][-7:]
+    weekly_pnl = sum([t['pnl'] for t in recent_trades])
+    winning = len([t for t in recent_trades if t['pnl'] > 0])
+    win_rate = (winning / 7 * 100)
+    
+    strategy_update = get_ai_strategy_update(state['trades'], weekly_pnl, win_rate)
+    
+    # Update strategy if needed
+    if strategy_update.get('should_adjust') and strategy_update.get('new_strategy'):
+        old_strategy = state.get('strategy', '')
+        state['strategy'] = strategy_update['new_strategy']
+        state['strategy_history'].append({
+            "timestamp": datetime.now().isoformat(),
+            "old_strategy": old_strategy,
+            "new_strategy": state['strategy'],
+            "reason": strategy_update.get('rationale', '')
+        })
+        print(f"[Strategy] Updated: {state['strategy']}")
+    
+    # Post weekly recap
+    week_end_date = current_date - timedelta(days=1)
+    recap_embed = format_weekly_recap_embed(
+        week_start_date.strftime('%Y-%m-%d'),
+        week_end_date.strftime('%Y-%m-%d'),
+        recent_trades,
+        weekly_pnl,
+        strategy_update,
+        state['strategy']
+    )
+    post_to_discord(recap_embed)
+    print(f"[Discord] Posted weekly recap!")
+    
+    # Save state and set next trading day
+    state['current_date'] = current_date.strftime('%Y-%m-%d')
     save_state(state)
     
-    print(f"[Hermes] {trade_date.strftime('%Y-%m-%d')} complete. Next: {next_date.strftime('%Y-%m-%d')}")
+    print(f"[Hermes] Week complete. Next: {current_date.strftime('%Y-%m-%d')}")
 
 if __name__ == "__main__":
     main()
